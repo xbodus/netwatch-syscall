@@ -4,10 +4,12 @@ Command-line interface for netwatch.
 This module provides the entry point for the netwatch CLI tool, which analyzes strace/dtruss output for network activity.
 """
 
+from sys import stderr
 import argparse
 from .analyzer import analyze_syscall_stream
 import subprocess
 import shlex
+import logging
 
 
 
@@ -34,11 +36,23 @@ def main():
 
     #Create functionality for passed args
     if args.verbose:
-        print("verbosity turned on") # CLI input test script (Remove later). Switch to operation the sets setting to detailed logging
+        log_level = logging.INFO # CLI input test script (Remove later). Switch to operation the sets setting to detailed logging
+    else:
+        log_level = logging.WARNING
     
+    logging.basicConfig(
+        level = log_level,
+        stream = stderr,
+        format = "[%(levelname)s] %(asctime)s - %(name)s: %(message)s",
+        datefmt = "%H:%M:%S",
+        force = True
+    )
+
+    logger = logging.getLogger(__name__)
+
     # Catch inputs that don't input process to watch
     if not args.process:
-        print("No process to trace specified. Please run netwatch again and include -p argument")
+        logger.warning("[ERROR] No process to trace specified. Please run netwatch again and include -p argument")
         return 
     
     # Sanatize CLI inputs
