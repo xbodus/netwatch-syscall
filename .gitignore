@@ -1,0 +1,22 @@
+# Virtual Environment
+.venv/
+
+# PYCACHE
+__pycache__
+*.pyc 
+
+# Pytest Cache
+.pytest_cache/
+
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
+
+# Agent Files
+.agent/
+
+# Personal Notes
+CYBERSECURITY_BUCKET_LIST.md
+JOURNAL.md

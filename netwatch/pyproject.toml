@@ -1,0 +1,6 @@
+[project]
+name = "netwatch"
+version = "0.1.0"
+
+[project.scripts]
+netwatch = "netwatch.cli:main" #Entrypoint to script. Call netwatch in CLI 
