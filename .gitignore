@@ -17,6 +17,9 @@ build/
 # Agent Files
 .agent/
 
+# DS Store
+.DS_Store
+
 # Personal Notes
 CYBERSECURITY_BUCKET_LIST.md
 JOURNAL.md

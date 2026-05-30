@@ -1,5 +1,5 @@
-from netwatch.parser import parse_socket, parse_connection, parse_data
-from netwatch.models import SocketInfo, ConnectionInfo, DataTransfer
+from netwatch.parser import parse_socket, parse_connection, parse_data, parse_procexec, parse_file_access, parse_close
+from netwatch.models import SocketInfo, ConnectionInfo, DataTransfer, ProcessExec, FileAccess, SyscallClose, ProcessExecOperation, FileAccessOperation, SyscallCloseOperation
 
 import pytest
 
@@ -90,3 +90,84 @@ def test_parse_data_invalid():
     """
     with pytest.raises(ValueError):
         parse_data("garbage connection test")
+
+
+def test_parse_valid_procexec():
+    """
+    Test parse_procexec correctly parses a process execution syscall line
+    """
+    line = 'execve("/usr/bin/bash", ["/usr/bin/bash", "-i"], [/* 24 vars */]) = 0'
+    result = parse_procexec(line)
+
+    assert isinstance(result, ProcessExec)
+    assert result.operation == ProcessExecOperation.EXECVE
+    assert result.pathname == "/usr/bin/bash"
+    assert result.args == ["/usr/bin/bash", "-i"]
+    assert result.envp == "[/* 24 vars */]"
+    assert result.ret_val == 0
+
+
+def test_parse_invalid_procexec():
+    """
+    Test ValueError on parse_procexec
+    """
+    with pytest.raises(ValueError):
+        parse_procexec("invalid execve test")
+
+
+def test_parse_valid_file_access():
+    """
+    Test parse_file_access correctly parses a file access syscall line
+    """
+    line = 'open("/etc/passwd", O_RDONLY) = 3'
+    result = parse_file_access(line)
+
+    assert isinstance(result, FileAccess)
+    assert result.operation == FileAccessOperation.OPEN
+    assert result.pathname == "/etc/passwd"
+    assert result.flags == ["O_RDONLY"]
+    assert result.ret_fd == 3
+    assert result.dirfd is None
+
+
+def test_parse_openat_file_access():
+    """
+    Test parse_file_access correctly parses an openat syscall line
+    """
+    line = 'openat(AT_FDCWD, "/tmp/payload", O_WRONLY|O_CREAT) = 4'
+    result = parse_file_access(line)
+
+    assert isinstance(result, FileAccess)
+    assert result.operation == FileAccessOperation.OPENAT
+    assert result.dirfd == "AT_FDCWD"
+    assert result.pathname == "/tmp/payload"
+    assert result.flags == ["O_WRONLY", "O_CREAT"]
+    assert result.ret_fd == 4
+
+
+def test_parse_invalid_file_access():
+    """
+    Test ValueError on parse_file_access
+    """
+    with pytest.raises(ValueError):
+        parse_file_access("invalid file access test")
+
+def test_parse_close():
+    """
+    Test parse_close correctly parses a close syscall line
+    """
+    line = 'close(3) = 0'
+    result = parse_close(line)
+
+    assert isinstance(result, SyscallClose)
+    assert result.fd == 3
+    assert result.operation == SyscallCloseOperation.CLOSE
+    assert result.ret_val == 0
+
+
+def test_parse_close_invalid():
+    """
+    Test ValueError on parse_close
+    """
+    with pytest.raises(ValueError):
+        parse_close("invalid close test")
