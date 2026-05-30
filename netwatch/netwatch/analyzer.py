@@ -2,6 +2,18 @@
 Analyzed parsed syscall data. Compile to link connected data
 """
 
-from .parser import parse_socket, parse_connection, parse_data, parse_procexec, parse_file_access, parse_close
+from .parser import SyscallParser
 
+parser = SyscallParser()
 
+SYSCALL_ENTRIES = [] # In-Memory collection
+
+def analyze_syscall_stream(file):
+    """
+    Analyzer entrypoint
+    Tails file from live strace feed and flags potential malicious patterns
+    """
+    with open() as f:
+        pass
+    
+    
