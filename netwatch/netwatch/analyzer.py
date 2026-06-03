@@ -3,8 +3,11 @@ Analyzed parsed syscall data. Compile to link connected data
 """
 from queue import Queue, Empty
 from threading import Event
+import logging
 from .parser import SyscallParser
 from .models import ParserEvent
+
+logger = logging.getLogger(__name__)
 
 parser = SyscallParser()
 
@@ -21,5 +24,7 @@ def analyze_syscall_stream(q: Queue, event: Event) -> None:
         try:
             parsed_data: ParserEvent = parser.parse_line(q.get(timeout=0.1))
             SYSCALL_ENTRIES.append(parsed_data)
-        except (Empty, ValueError):
+        except (Empty, ValueError) as e:
+            if not isinstance(e, Empty):
+                logger.warning(f"[ERROR] Analyzer Error: {e}")
             continue

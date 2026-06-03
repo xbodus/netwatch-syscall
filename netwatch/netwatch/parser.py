@@ -10,7 +10,7 @@ class SyscallParser:
     def __init__(self):
         self.registry = {
             "socket": self.parse_socket,
-            "connection": self.parse_connection,
+            "connect": self.parse_connection,
             "write": self.parse_data,
             "read": self.parse_data,
             "execve": self.parse_procexec,
