@@ -28,6 +28,8 @@ from dataclasses import dataclass
 from enum import Enum 
 
 
+type ParserEvent = SocketInfo | ConnectionInfo | DataTransfer | ProcessExec | FileAccess | SyscallClose
+
 class SocketInfoFamily(Enum):
     AF_INET = "AF_INET"
     PF_INET = "PF_INET"

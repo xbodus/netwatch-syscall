@@ -4,10 +4,12 @@ Command-line interface for netwatch.
 This module provides the entry point for the netwatch CLI tool, which analyzes strace/dtruss output for network activity.
 """
 
+import subprocess
 from sys import stderr
+from queue import Queue
+import threading
 import argparse
 from .analyzer import analyze_syscall_stream
-import subprocess
 import shlex
 import logging
 
@@ -25,7 +27,7 @@ def main():
     # Add argments to parser
     parser.add_argument("-v", "--verbose", help="Displays verbose logging to console", action="store_true") # args without action require CLI input. Action specifies what should happen if arg is passed in CLI
     parser.add_argument("-p", "--process", help="Specify process to trace")
-    parser.add_argument("-f", "--file", help="Specify file name for raw strace output")
+    # parser.add_argument("-f", "--file", help="Specify file name for raw strace output")
 
     # Flags: -p (PID), -f (FORK), -o (FILE OUTPUT), -c (SUMMARY), -e (FILTERING), -s (OUTPUT SIZE), -v (VERBOSE), -t (ADDS TIME CLOCK), -tt (ADDS MICROSECONDS), -T (SHOW TOTAL DURATION)
     # Sample input: -a "-f -e trace=network"
@@ -57,22 +59,50 @@ def main():
     
     # Sanatize CLI inputs
     process = shlex.quote(args.process)
-    file = shlex.quote(args.file) if args.file else "default_netwatch_output.log"
+    # file = shlex.quote(args.file) if args.file else "default_netwatch_output.log"
     strace_args = [shlex.quote(arg) for arg in args.args.split(" ")] if args.args else []
 
     # Start strace process
     # !Important: Strace is continuous without stop command. Popen is non-blocking. Read output from specified file
     strace_proc = subprocess.Popen(
-        ["strace", "-p", process, "-o", file, *strace_args] if process.isdigit() else ["strace", "-o", file, *strace_args, process], # Add extra args once we decide how we want to handle strace flags. Ex: -o or --output for file output
-        text=True
-    ) 
+        ["strace", "-p", process, *strace_args] if process.isdigit() else ["strace", *strace_args, process], # Add extra args once we decide how we want to handle strace flags. Ex: -o or --output for file output
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1
+    )
+
+    # stdout = strace_proc.communicate()
+
+    syscall_queue = Queue()
+
+    producer_thread_event = threading.Event()
+    consumer_thread_event = threading.Event()
+    
+    producer_thread = threading.Thread(target=producer, args=(syscall_queue, strace_proc, producer_thread_event), daemon=True)
+    consumer_thread = threading.Thread(target=consumer, args=(syscall_queue, consumer_thread_event), daemon=True)
 
     try:
-        # Pass filename to main analyzer entry point to start tailing strace logs
-        analyze_syscall_stream(file)
+        producer_thread.start()
+        consumer_thread.start()
+        producer_thread.join()
     except KeyboardInterrupt:
+        producer_thread_event.set()
+        consumer_thread_event.set()
         if not strace_proc.poll():
             strace_proc.kill() # Kill strace subprocess on CTRL + C input
+
+def producer(q: Queue, process: subprocess.Popen[str], event: threading.Event) -> None:
+    """
+    Reads lines from syscall stdout and adds line to queue
+    """
+    for line in process.stderr:
+        if event.is_set():
+            break
+        q.put(line)  # Add line to que
+
+def consumer(q: Queue, event: threading.Event) -> None:
+    # Pass filename to main analyzer entry point to start tailing strace logs
+    analyze_syscall_stream(q, event)
 
 if __name__ == "__main__":
     main()

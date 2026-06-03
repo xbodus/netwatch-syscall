@@ -3,10 +3,42 @@ Parse strace output for analyzing
 """
 
 import re
-from .models import SocketInfo, ConnectionInfo, DataTransfer, ProcessExec, FileAccess, SyscallClose, FileAccessOperation, SyscallCloseOperation, ProcessExecOperation
+from .models import SocketInfo, ConnectionInfo, DataTransfer, ProcessExec, FileAccess, SyscallClose, FileAccessOperation, SyscallCloseOperation, ProcessExecOperation, ParserEvent
 
 
 class SyscallParser:
+    def __init__(self):
+        self.registry = {
+            "socket": self.parse_socket,
+            "connection": self.parse_connection,
+            "write": self.parse_data,
+            "read": self.parse_data,
+            "execve": self.parse_procexec,
+            "open": self.parse_file_access,
+            "openat": self.parse_file_access,
+            "close": self.parse_close
+        }
+
+
+    def parse_line(self, line: str) -> ParserEvent:
+        """
+        Extract the system call name and route it to the appropriate parser
+        """
+        pattern = r'^([a-z0-9_]+)\('
+        match = re.search(pattern, line.strip())
+
+        if not match:
+            raise ValueError("Unable to identify system call prefix")
+
+        syscall_name = match.group(1)
+        method = self.registry.get(syscall_name)
+
+        if not method:
+            raise ValueError(f"No parser method registered for system call: {syscall_name}")
+
+        return method(line)
+
+
     def parse_socket(self, line: str) -> SocketInfo:
         """
         Parse socket info
