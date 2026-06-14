@@ -5,6 +5,13 @@ import pytest
 
 parser = SyscallParser()
 
+
+def test_invalid_parse_line():
+    with pytest.raises(ValueError, match="No parser method registered for system call"):
+        line = 'connection(3, {sa_family=AF_INET, sin_port=htons(5555), sin_addr=inet_addr("192.168.10.1")}, 16) = 0'
+        parser.parse_line(line)
+
+
 def test_parse_socket():
     """
     Test parse_socket correctly parses a socket syscall line
@@ -28,9 +35,6 @@ def test_parse_socket_invalid():
         parser.parse_socket("garbage socket test")
 
 
-
-
-
 def test_parse_connection():
     """
     Test parse_connection correctly parses a connection syscall line
@@ -52,8 +56,6 @@ def test_parse_connection_invalid():
     """
     with pytest.raises(ValueError):
         parser.parse_connection("garbage connection test")
-
-
 
 
 def test_parse_data_write():
