@@ -2,12 +2,14 @@
 Parse strace output for analyzing
 """
 
+from ast import pattern
 import re
-from .models import SocketInfo, ConnectionInfo, DataTransfer, ProcessExec, FileAccess, SyscallClose, FileAccessOperation, SyscallCloseOperation, ProcessExecOperation, ParserEvent
+from .models import SocketInfo, ConnectionInfo, DataTransfer, ProcessExec, FileAccess, SyscallClose, FileAccessOperation, SyscallCloseOperation, ProcessExecOperation, ParserEvent, ProcessFork, ForkOperation
 
 
 class SyscallParser:
-    def __init__(self):
+    def __init__(self, default_pid:int = 0):
+        self.default_pid = default_pid # Default set for single process traces
         self.registry = {
             "socket": self.parse_socket,
             "connect": self.parse_connection,
@@ -16,7 +18,11 @@ class SyscallParser:
             "execve": self.parse_procexec,
             "open": self.parse_file_access,
             "openat": self.parse_file_access,
-            "close": self.parse_close
+            "close": self.parse_close,
+            "fork": self.parse_fork,
+            "clone": self.parse_fork,
+            "vfork": self.parse_fork,
+            "clone3": self.parse_fork
         }
 
 
@@ -24,8 +30,30 @@ class SyscallParser:
         """
         Extract the system call name and route it to the appropriate parser
         """
-        pattern = r'^([a-z0-9_]+)\('
-        match = re.search(pattern, line.strip())
+        clean_line = line.strip()
+
+        pid = self.default_pid
+        pid_pattern = r'^(\d+|\[\d+\]|\[pid\s+\d+\])\s+(.*)'
+        pid_match = re.search(pid_pattern, clean_line)
+
+
+        if pid_match:
+            pid_str, clean_line = pid_match.groups()
+            pid = int(re.sub(r'\D', '', pid_str)) # sub anythin that is not a digit
+
+        event = self._parse_syscall(clean_line)
+        event.pid = pid
+        if isinstance(event, ProcessFork):
+            event.parent_pid = pid
+        return event
+
+
+    def _parse_syscall(self, line) -> ParserEvent:
+        """
+        Helper method to route line to proper parser
+        """
+        syscall_pattern = r'^([a-z0-9_]+)\('
+        match = re.search(syscall_pattern, line)
 
         if not match:
             raise ValueError("Unable to identify system call prefix")
@@ -50,7 +78,7 @@ class SyscallParser:
 
         if match:
             family, sock_type, protocol, fd = match.groups()
-            return SocketInfo(family=family, sock_type=sock_type, protocol=protocol, fd=int(fd))
+            return SocketInfo(domain=family, type=sock_type, protocol=protocol, fd=int(fd))
         raise ValueError("Unable to parse socket info")
 
 
@@ -60,12 +88,21 @@ class SyscallParser:
 
         Example: connect(3, {sa_family=AF_INET, sin_port=htons(5555), sin_addr=inet_addr("192.168.10.1")}, 16) = 0
         """
-        pattern = r'connect\((\d+), \{.+=(.+), .+=.+\((\d+)\), .+=.+\("(\d{1,3}.\d{1,3}.\d{1,3}.\d{1,3})"\)\}, \d+\) = \d+'
+        pattern = r'connect\((\d+), \{.+=(.+), .+=.+\((\d+)\), .+=.+\("(\d{1,3}.\d{1,3}.\d{1,3}.\d{1,3})"\)\}, (\d+)\) = (\d+)'
         match = re.match(pattern, line)
 
         if match:
-            fd, family, port, ip = match.groups()
-            return ConnectionInfo(fd=int(fd), family=family, port=int(port), ip=ip)
+            fd, family, port, ip, addrlen, rtn_val = match.groups()
+            return ConnectionInfo(
+                fd=int(fd), 
+                addr={
+                    "sa_family": family,
+                    "sin_port": int(port),
+                    "sin_addr": ip
+                },
+                addrlen=addrlen,
+                rtn_val=rtn_val
+                )
         raise ValueError("Unable to parse connection info")
 
 
@@ -134,11 +171,32 @@ class SyscallParser:
             return FileAccess(
                 operation=FileAccessOperation(operation),
                 dirfd=dirfd,
-                pathname=pathname, 
+                path=pathname, 
                 flags=flags,
-                ret_fd=int(ret_fd),
+                ret_val=int(ret_fd),
             )
         raise ValueError("Unable to parse file access")
+
+    
+    def parse_fork(self, line: str) -> ProcessFork:
+        """
+        Parse fork/clone system calls
+
+        Example: 
+            - 1000  clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|SIGCHLD, ...) = 1001
+            - 1000  fork() = 1001
+        """
+        pattern = r'^(fork|clone|vfork|clone3)\(.*\)\s+=\s+(\d+)'
+        match = re.search(pattern, line)
+
+        if match:
+            operation, child_pid = match.groups()
+            return ProcessFork(
+                operation=ForkOperation(operation),
+                parent_pid=0,
+                child_pid=int(child_pid)
+            )
+        raise ValueError("Unable to parse fork/clone")
 
 
     def parse_close(self, line: str) -> SyscallClose:

@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from enum import Enum 
 
 
-type ParserEvent = SocketInfo | ConnectionInfo | DataTransfer | ProcessExec | FileAccess | SyscallClose
+type ParserEvent = SocketInfo | ConnectionInfo | DataTransfer | ProcessExec | FileAccess | SyscallClose | ProcessFork
 
 class SocketDomain(Enum):
     AF_UNIX = "AF_UNIX" # Local link
@@ -81,6 +81,7 @@ class SocketInfo:
     type: SocketType
     protocol: SocketProtocol
     fd: int
+    pid: int|None = None
 
 
 @dataclass
@@ -100,6 +101,7 @@ class ConnectionInfo:
     addr: dict[str, Any] # Stores sa_family, sin_port, sin_addr
     addrlen: int
     rtn_val: int # 0 = successful connection  -1 = error
+    pid: int|None = None
 
 
 class DataTransferOperation(Enum):
@@ -129,6 +131,7 @@ class DataTransfer:
     data: str
     bytes_requested: int
     bytes_transferred: int
+    pid: int|None = None
 
 
 class ProcessExecOperation(Enum):
@@ -152,7 +155,7 @@ class ProcessExec:
     args: list[str] # args[0] is the name of the command being executed
     envp: str
     ret_val: int
-    pid: int | None = None # If pid is specified
+    pid: int | None = None
     mem_addr: str | None = None
 
 
@@ -184,7 +187,7 @@ class FileAccess:
     flags: list[str]
     ret_val: int
     dirfd: str | None = None # For openat
-    pid: int | None = None # If pid is specified
+    pid: int | None = None
     
 
 
@@ -207,12 +210,26 @@ class SyscallClose:
     operation: SyscallCloseOperation
     fd: int
     ret_val: int
-    pid: int | None = None # If pid is specified
+    pid: int | None = None
+
+
+class ForkOperation(Enum):
+    CLONE = "clone"
+    CLONE3 = "clone3"
+    FORK = "fork"
+    VFORK = "vfork"
+
+@dataclass
+class ProcessFork:
+    operation: ForkOperation
+    parent_pid: int
+    child_pid: int
+    pid: int|None = None
 
 
 @dataclass
 class ProcessDetails:
     pid: int
-    binary_path: str
+    binary_path: str | None = None
     parent_pid: int | None = None
     child_pids: list[int] = field(default_factory=list)

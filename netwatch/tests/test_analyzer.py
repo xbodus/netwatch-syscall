@@ -1,4 +1,3 @@
-from netwatch.analyzer import SYSCALL_ENTRIES
 from netwatch.models import ConnectionInfo
 from netwatch.cli import consumer
 from queue import Queue
@@ -7,6 +6,8 @@ import time
 import pytest
 
 
+
+SYSCALL_ENTRIES = []
 
 def test_valid_stream():
     syscall_queue= Queue()

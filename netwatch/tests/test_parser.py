@@ -21,8 +21,8 @@ def test_parse_socket():
     result = parser.parse_socket(line)
 
     assert isinstance(result, SocketInfo)
-    assert result.family == "PF_INET"
-    assert result.sock_type == "SOCK_STREAM"
+    assert result.domain == "PF_INET"
+    assert result.type == "SOCK_STREAM"
     assert result.protocol == "IPPROTO_TCP"
     assert result.fd == 3
 
@@ -45,9 +45,9 @@ def test_parse_connection():
 
     assert isinstance(result, ConnectionInfo)
     assert result.fd == 3
-    assert result.family == "AF_INET"
-    assert result.port == 5555
-    assert result.ip == "192.168.10.1"
+    assert result.addr["sa_family"] == "AF_INET"
+    assert result.addr["sin_port"] == 5555
+    assert result.addr["sin_addr"] == "192.168.10.1"
 
 
 def test_parse_connection_invalid():
@@ -128,9 +128,9 @@ def test_parse_valid_file_access():
 
     assert isinstance(result, FileAccess)
     assert result.operation == FileAccessOperation.OPEN
-    assert result.pathname == "/etc/passwd"
+    assert result.path == "/etc/passwd"
     assert result.flags == ["O_RDONLY"]
-    assert result.ret_fd == 3
+    assert result.ret_val == 3
     assert result.dirfd is None
 
 
@@ -144,9 +144,9 @@ def test_parse_openat_file_access():
     assert isinstance(result, FileAccess)
     assert result.operation == FileAccessOperation.OPENAT
     assert result.dirfd == "AT_FDCWD"
-    assert result.pathname == "/tmp/payload"
+    assert result.path == "/tmp/payload"
     assert result.flags == ["O_WRONLY", "O_CREAT"]
-    assert result.ret_fd == 4
+    assert result.ret_val == 4
 
 
 def test_parse_invalid_file_access():

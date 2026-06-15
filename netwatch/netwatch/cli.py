@@ -21,29 +21,21 @@ def main():
 
     Parses command-line arguments and dispatches to the appropriate handler.
     """
-    # Init parser
     parser = argparse.ArgumentParser()
 
-    # Add argments to parser
-    parser.add_argument("-v", "--verbose", help="Displays verbose logging to console", action="store_true") # args without action require CLI input. Action specifies what should happen if arg is passed in CLI
-    parser.add_argument("-p", "--process", help="Specify process to trace")
-    # parser.add_argument("-f", "--file", help="Specify file name for raw strace output")
+    parser.add_argument("-v", "--verbose", help="Displays verbose logging to console", action="store_true")
+    
+    # !Important: Netwatch monitors processes already running. Requires pids to work
+    parser.add_argument("-p", "--pid", nargs="+", help="Specify process id(s) to trace")
 
-    # Flags: -p (PID), -f (FORK), -o (FILE OUTPUT), -c (SUMMARY), -e (FILTERING), -s (OUTPUT SIZE), -v (VERBOSE), -t (ADDS TIME CLOCK), -tt (ADDS MICROSECONDS), -T (SHOW TOTAL DURATION)
+    # Flags: -f (FORK), -o (FILE OUTPUT), -c (SUMMARY), -e (FILTERING), -s (OUTPUT SIZE), -v (VERBOSE), -t (ADDS TIME CLOCK), -tt (ADDS MICROSECONDS), -T (SHOW TOTAL DURATION)
     # Sample input: -a "-f -e trace=network"
     parser.add_argument("-a", "--args", help="Pass specific strace flags to customize output")
     
-    # Parse passed args
-    args = parser.parse_args() # Creates --help and usage information
-
-    #Create functionality for passed args
-    if args.verbose:
-        log_level = logging.INFO # CLI input test script (Remove later). Switch to operation the sets setting to detailed logging
-    else:
-        log_level = logging.WARNING
+    args = parser.parse_args()
     
     logging.basicConfig(
-        level = log_level,
+        level = logging.INFO if args.verbose else logging.WARNING,
         stream = stderr,
         format = "[%(levelname)s] %(asctime)s - %(name)s: %(message)s",
         datefmt = "%H:%M:%S",
@@ -52,26 +44,23 @@ def main():
 
     logger = logging.getLogger(__name__)
 
-    # Catch inputs that don't input process to watch
-    if not args.process:
-        logger.warning("[ERROR] No process to trace specified. Please run netwatch again and include -p argument")
+    if not args.pid:
+        logger.warning("[ERROR] No process id(s) to trace specified. Please run netwatch again and include -p argument")
         return 
     
     # Sanatize CLI inputs
-    process = shlex.quote(args.process)
+    processes = [pid for pid in args.pid if pid.isdigit()]
     # file = shlex.quote(args.file) if args.file else "default_netwatch_output.log"
-    strace_args = [shlex.quote(arg) for arg in args.args.split(" ")] if args.args else []
+    strace_args = shlex.split(args.args)if args.args else []
 
     # Start strace process
     # !Important: Strace is continuous without stop command. Popen is non-blocking. Read output from specified file
     strace_proc = subprocess.Popen(
-        ["strace", "-p", process, *strace_args] if process.isdigit() else ["strace", *strace_args, process], # Add extra args once we decide how we want to handle strace flags. Ex: -o or --output for file output
+        ["strace", "-p", ",".join(processes), "-f", *strace_args], # Add extra args once we decide how we want to handle strace flags. Ex: -o or --output for file output
         stderr=subprocess.PIPE,
         text=True,
         bufsize=1
     )
-
-    # stdout = strace_proc.communicate()
 
     syscall_queue = Queue()
 
