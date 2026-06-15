@@ -100,7 +100,7 @@ class ConnectionInfo:
     fd: int
     addr: dict[str, Any] # Stores sa_family, sin_port, sin_addr
     addrlen: int
-    rtn_val: int # 0 = successful connection  -1 = error
+    ret_val: int # 0 = successful connection  -1 = error
     pid: int|None = None
 
 
@@ -221,6 +221,21 @@ class ForkOperation(Enum):
 
 @dataclass
 class ProcessFork:
+    """
+    Fork/Clone system call
+    Each entry descibes a variable in fork/clone system call spawning new process
+
+    Structure: 
+        Creates a new process by duplicating the calling process.
+        fork(void) = return value (returns child pid or error (-1))
+        fork() = 1001
+
+        These system calls create a new ("child") process, in a manner similar to fork(2).
+        clone() = return value (returns child pid or error (-1))
+        clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|SIGCHLD, ...) = 1001
+
+    See https://man7.org/linux/man-pages/man2/fork.2.html for more information on fork calls.
+    """
     operation: ForkOperation
     parent_pid: int
     child_pid: int

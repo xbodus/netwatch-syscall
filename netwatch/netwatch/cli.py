@@ -9,9 +9,10 @@ from sys import stderr
 from queue import Queue
 import threading
 import argparse
-from .analyzer import analyze_syscall_stream
 import shlex
 import logging
+from .analyzer import analyze_syscall_stream
+from .state import SyscallState
 
 
 
@@ -19,17 +20,15 @@ def main():
     """
     Entry point for the netwatch CLI.
 
-    Parses command-line arguments and dispatches to the appropriate handler.
+    Parses command-line arguments and dispatches to analyzer.
     """
     parser = argparse.ArgumentParser()
 
+    parser.add_argument("process", nargs="?", help="Specify single process to trace")
     parser.add_argument("-v", "--verbose", help="Displays verbose logging to console", action="store_true")
-    
-    # !Important: Netwatch monitors processes already running. Requires pids to work
-    parser.add_argument("-p", "--pid", nargs="+", help="Specify process id(s) to trace")
-
-    # Flags: -f (FORK), -o (FILE OUTPUT), -c (SUMMARY), -e (FILTERING), -s (OUTPUT SIZE), -v (VERBOSE), -t (ADDS TIME CLOCK), -tt (ADDS MICROSECONDS), -T (SHOW TOTAL DURATION)
-    # Sample input: -a "-f -e trace=network"
+    parser.add_argument("-p", "--pid", nargs="*", help="Specify process id(s) to trace")
+    # Flags: -o (FILE OUTPUT), -c (SUMMARY), -e (FILTERING), -s (OUTPUT SIZE), -v (VERBOSE), -t (ADDS TIME CLOCK), -tt (ADDS MICROSECONDS), -T (SHOW TOTAL DURATION)
+    # Sample input: -a "-e trace=network"
     parser.add_argument("-a", "--args", help="Pass specific strace flags to customize output")
     
     args = parser.parse_args()
@@ -44,19 +43,29 @@ def main():
 
     logger = logging.getLogger(__name__)
 
-    if not args.pid:
-        logger.warning("[ERROR] No process id(s) to trace specified. Please run netwatch again and include -p argument")
+    if args.process and args.pid:
+        logger.warning("[ERROR] Cannot trace both single process and pid(s) at same time. Please run netwatch again and include either process to spawn or -p argument(s)")
+        return
+
+    if not args.process and not args.pid:
+        logger.warning("[ERROR] No process or pid(s) to trace specified. Please run netwatch again and include -p argument")
         return 
     
-    # Sanatize CLI inputs
-    processes = [pid for pid in args.pid if pid.isdigit()]
-    # file = shlex.quote(args.file) if args.file else "default_netwatch_output.log"
-    strace_args = shlex.split(args.args)if args.args else []
+    cmd = ["strace", "-f"]
+    if args.process:
+        cmd.extend([args.process])
+    elif args.pid:
+        for pid in args.pid:
+            if pid.isdigit():
+                cmd.extend(["-p", pid])
+    
+    if args.args:
+        cmd.extend(shlex.split(args.args)) # Sanitize inputs
 
     # Start strace process
     # !Important: Strace is continuous without stop command. Popen is non-blocking. Read output from specified file
     strace_proc = subprocess.Popen(
-        ["strace", "-p", ",".join(processes), "-f", *strace_args], # Add extra args once we decide how we want to handle strace flags. Ex: -o or --output for file output
+        cmd,
         stderr=subprocess.PIPE,
         text=True,
         bufsize=1
@@ -89,9 +98,11 @@ def producer(q: Queue, process: subprocess.Popen[str], event: threading.Event) -
             break
         q.put(line)  # Add line to que
 
-def consumer(q: Queue, event: threading.Event) -> None:
-    # Pass filename to main analyzer entry point to start tailing strace logs
-    analyze_syscall_stream(q, event)
+def consumer(q: Queue, event: threading.Event, state: SyscallState = None) -> None:
+    """
+    Pass queue to analyzer with event for tracking program state
+    """
+    analyze_syscall_stream(q, event, state)
 
 if __name__ == "__main__":
     main()

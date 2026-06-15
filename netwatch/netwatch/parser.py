@@ -4,7 +4,11 @@ Parse strace output for analyzing
 
 from ast import pattern
 import re
+import logging
 from .models import SocketInfo, ConnectionInfo, DataTransfer, ProcessExec, FileAccess, SyscallClose, FileAccessOperation, SyscallCloseOperation, ProcessExecOperation, ParserEvent, ProcessFork, ForkOperation
+
+
+logger = logging.getLogger(__name__)
 
 
 class SyscallParser:
@@ -34,7 +38,7 @@ class SyscallParser:
 
         pid = self.default_pid
         pid_pattern = r'^(\d+|\[\d+\]|\[pid\s+\d+\])\s+(.*)'
-        pid_match = re.search(pid_pattern, clean_line)
+        pid_match = re.search(pid_pattern, clean_line, flags=re.DOTALL)
 
 
         if pid_match:
@@ -100,8 +104,8 @@ class SyscallParser:
                     "sin_port": int(port),
                     "sin_addr": ip
                 },
-                addrlen=addrlen,
-                rtn_val=rtn_val
+                addrlen=int(addrlen),
+                ret_val=int(rtn_val)
                 )
         raise ValueError("Unable to parse connection info")
 
@@ -114,9 +118,9 @@ class SyscallParser:
             - write(3, "Hello World!\n", 13) = 13
             - read(3, "Boo!\n", 2048) = 5
         """
-        pattern = r'([a-z]+)\((\d+), "(.+\n)", (\d+)\) = (\d+)'
+        pattern = r'([a-z]+)\((\d+), "([^"]*)", (\d+)\) = (\d+)'
         match = re.match(pattern, line)
-
+        
         if match:
             operation, fd, data, bytes_requested, bytes_transferred = match.groups()
             return DataTransfer(
@@ -126,6 +130,7 @@ class SyscallParser:
                 bytes_requested=int(bytes_requested), 
                 bytes_transferred=int(bytes_transferred)
             )
+        logger.warning(f"[ERROR] Line: {line}, Match: {match}")
         raise ValueError("Unable to parse data transfer")
 
 
