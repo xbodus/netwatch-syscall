@@ -83,6 +83,8 @@ class SyscallParser:
         if match:
             family, sock_type, protocol, fd = match.groups()
             return SocketInfo(domain=family, type=sock_type, protocol=protocol, fd=int(fd))
+        
+        logger.warning(f"[ERROR] Failed to parse socket: {line}")
         raise ValueError("Unable to parse socket info")
 
 
@@ -107,6 +109,8 @@ class SyscallParser:
                 addrlen=int(addrlen),
                 ret_val=int(rtn_val)
                 )
+
+        logger.warning(f"[ERROR] Failed to parse connect: {line}")
         raise ValueError("Unable to parse connection info")
 
 
@@ -130,7 +134,8 @@ class SyscallParser:
                 bytes_requested=int(bytes_requested), 
                 bytes_transferred=int(bytes_transferred)
             )
-        logger.warning(f"[ERROR] Line: {line}, Match: {match}")
+
+        logger.warning(f"[ERROR] Failed to parse data transfer: {match}")
         raise ValueError("Unable to parse data transfer")
 
 
@@ -155,6 +160,8 @@ class SyscallParser:
                 envp=envp_raw,
                 ret_val=int(ret_val)
             )
+        
+        logger.warning(f"[ERROR] Failed to parse process exec: {line}")
         raise ValueError("Unable to parse process exec")
 
 
@@ -180,6 +187,8 @@ class SyscallParser:
                 flags=flags,
                 ret_val=int(ret_fd),
             )
+
+        logger.warning(f"[ERROR] Failed to parse file access: {line}")
         raise ValueError("Unable to parse file access")
 
     
@@ -201,6 +210,8 @@ class SyscallParser:
                 parent_pid=0,
                 child_pid=int(child_pid)
             )
+        
+        logger.warning(f"[ERROR] Failed to parse {line}")
         raise ValueError("Unable to parse fork/clone")
 
 
@@ -220,4 +231,6 @@ class SyscallParser:
                 operation=SyscallCloseOperation.CLOSE,
                 ret_val=int(ret_val)
             )
+
+        logger.warning(f"[ERROR] Failed to parse close: {line}")
         raise ValueError("Unable to parse close")
