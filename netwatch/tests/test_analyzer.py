@@ -1,4 +1,15 @@
-from netwatch.models import ConnectionInfo, SocketInfo, DataTransfer, ProcessDetails, FileAccess, FileAccessOperation
+from netwatch.models import (
+    ConnectionInfo, 
+    SocketInfo,
+    SocketDomain,
+    SocketType,
+    SocketProtocol, 
+    DataTransfer, 
+    DataTransferOperation,
+    ProcessDetails, 
+    FileAccess, 
+    FileAccessOperation,
+)
 from netwatch.cli import consumer
 from queue import Queue
 import threading
@@ -55,9 +66,9 @@ def test_valid_socket_stream():
     fd, details = list(entry.items())[0]
     assert isinstance(details, SocketInfo)
     assert fd == 3
-    assert details.domain == "PF_INET"
-    assert details.type == "SOCK_STREAM"
-    assert details.protocol == "IPPROTO_TCP"
+    assert details.domain == SocketDomain.PF_INET
+    assert details.type == SocketType.SOCK_STREAM
+    assert details.protocol == SocketProtocol.IPPROTO_TCP
 
 def test_valid_connect_stream():
     syscall_queue= Queue()
@@ -108,7 +119,7 @@ def test_valid_data_transfer():
     # Test write
     assert isinstance(write_entry, DataTransfer)
     assert write_fd == 3
-    assert write_entry.operation == "write"
+    assert write_entry.operation == DataTransferOperation.WRITE
     assert write_entry.data == "Hello World!\n"
     assert write_entry.bytes_requested == 13
     assert write_entry.bytes_transferred == 13
@@ -116,7 +127,7 @@ def test_valid_data_transfer():
     # Test read
     assert isinstance(read_entry, DataTransfer)
     assert read_fd == 4
-    assert read_entry.operation == "read"
+    assert read_entry.operation == DataTransferOperation.READ
     assert read_entry.data == "Boo!\n"
     assert read_entry.bytes_requested == 2048
     assert read_entry.bytes_transferred == 5
