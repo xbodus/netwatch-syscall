@@ -33,6 +33,9 @@ from enum import Enum
 
 type ParserEvent = SocketInfo | ConnectionInfo | DataTransfer | ProcessExec | FileAccess | SyscallClose | ProcessFork
 
+class SocketOperation(Enum):
+    SOCKET = "socket"
+
 class SocketDomain(Enum):
     AF_UNIX = "AF_UNIX" # Local link
     PF_UNIX = "PF_UNIX" # Synonym AF_UNIX
@@ -77,12 +80,20 @@ class SocketInfo:
     
     See https://man7.org/linux/man-pages/man2/socket.2.html for more information on socket calls
     """
+    operation: SocketOperation
     domain: SocketDomain
     type: SocketType
     protocol: SocketProtocol
     fd: int
     pid: int|None = None
 
+
+class ConnectionOperation(Enum):
+    CONNECT = "connect"
+    BIND = "bind"
+    LISTEN = "listen"
+    ACCEPT = "accept"
+    ACCEPT4 = "accept4"
 
 @dataclass
 class ConnectionInfo:
@@ -92,16 +103,41 @@ class ConnectionInfo:
 
     Structure:
         Connects the socket referred to by the file descriptor sockfd to the address specified by addr.
-        connect(int sockfd, const struct sockaddr *addr, socketlen_t addrlen)
+        connect(int sockfd, const struct sockaddr *addr, socketlen_t addrlen) = return value (returns success (0) or error (-1))
         connect(3, {sa_family=AF_INET, sin_port=htons(5555), sin_addr=inet_addr("192.168.10.1")}, 16) = 0
 
+        Assigns the address specified by addr to the socket referred to by the file descriptor sockfd.
+        bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen) = return value (returns success (0) or error (-1))
+        bind(4, {sa_family=AF_INET, sin_port=htons(4444), sin_addr=inet_addr("60.10.15.1")}, 16) = 0
+
+        Marks the socket referred to by sockfd as a passive socket, that is, as a socket that will be used to accept incoming connection requests using accept(2).
+        listen(int sockfd, int backlog) = return value (returns success (0) or error (-1))
+        listen(3, 128) = 0
+
+        Used with connection-based socket types (SOCK_STREAM, SOCK_SEQPACKET).  It extracts the first connection request on the queue of pending connections for the listening socket, sockfd, creates a new connected socket, and returns a new file descriptor referring to that socket.
+        accept(int sockfd, struct sockaddr *_Nullable restrict addr, socklen_t *_Nullable restrict addrlen) = return value (returns new fd for incoming connection or error (-1))
+        accept(3, {sa_family=AF_INET, sin_port=htons(4444), sin_addr=inet_addr("60.10.15.1")}, 16) = 4
+
+        accept4(int sockfd, struct sockaddr *_Nullable restrict addr, socklen_t *_Nullable restrict addrlen, int flags) = return value (returns new fd or error (-1))
+        accept4(3, {sa_family=AF_INET, sin_port=htons(4444), sin_addr=inet_addr("60.10.15.1")}, 16, SOCK_NONBLOCK) = 4
+
     See https://man7.org/linux/man-pages/man2/connect.2.html for more information on connect calls
+    See https://man7.org/linux/man-pages/man2/bind.2.html for more information on bind calls
+    See https://man7.org/linux/man-pages/man2/listen.2.html for more information on listen calls
+    See https://man7.org/linux/man-pages/man2/accept.2.html for more information on accept/accept4 calls
     """
-    fd: int
-    addr: dict[str, Any] # Stores sa_family, sin_port, sin_addr
-    addrlen: int
-    ret_val: int # 0 = successful connection  -1 = error
-    pid: int|None = None
+    operation: ConnectionOperation
+    sockfd: int
+    ret_val: int
+    pid: int | None = None
+    addr: dict[str, Any] | None = None # Stores sa_family, sin_port, sin_addr
+    addrlen: int | None = None
+    backlog: int | None = None
+    flags: list[str] | None = None
+
+    @property
+    def fd(self) -> int:
+        return self.sockfd
 
 
 class DataTransferOperation(Enum):
@@ -162,6 +198,8 @@ class ProcessExec:
 class FileAccessOperation(Enum):
     OPEN = "open"
     OPENAT = "openat"
+    UNLINK = "unlink"
+    UNLINKAT = "unlinkat"
 
 @dataclass
 class FileAccess:
@@ -179,15 +217,27 @@ class FileAccess:
         openat(int dirfd, const char *path, int flags, ..., /* mode_t mode */) = return value
         openat(AT_FDCWD, "/tmp/payload", O_WRONLY|O_CREAT) = 4
 
+        Deletes a name from the filesystem.
+        unlink(const char *path) = return value (returns success (0) or error (-1))
+        unlink("/tmp/payload") = 0
+
+        Operates in exactly the same way as either unlink() except at specified diretory fd
+        unlinkat(int dirfd, const char *path, int flags) = return value (returns success (0) or error (-1))
+        unlinkat(AT_FDCWD, "example.txt", 0) = 0
+
     See https://man7.org/linux/man-pages/man2/open.2.html for more information on open calls
     See https://man7.org/linux/man-pages/man2/openat2.2.html for more information on openat calls (Extension of openat)
     """
     operation: FileAccessOperation
     path: str
-    flags: list[str]
     ret_val: int
-    dirfd: str | None = None # For openat
     pid: int | None = None
+    dirfd: str | None = None
+    flags: list[str] | None = None
+
+    @property
+    def fd(self) -> int:
+        return self.sockfd
     
 
 
@@ -231,15 +281,164 @@ class ProcessFork:
         fork() = 1001
 
         These system calls create a new ("child") process, in a manner similar to fork(2).
-        clone() = return value (returns child pid or error (-1))
+        clone(typeof(int (void *_Nullable)) *fn,
+                 void *stack,
+                 int flags,
+                 void *_Nullable arg, ...
+                 /* pid_t *_Nullable parent_tid,
+                    void *_Nullable tls,
+                    pid_t *_Nullable child_tid */) = return value (returns child pid or error (-1))
         clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|SIGCHLD, ...) = 1001
 
-    See https://man7.org/linux/man-pages/man2/fork.2.html for more information on fork calls.
+    See https://man7.org/linux/man-pages/man2/fork.2.html for more information on fork calls
+    See https://man7.org/linux/man-pages/man2/clone.2.html for more information on clone calls
     """
     operation: ForkOperation
     parent_pid: int
     child_pid: int
     pid: int|None = None
+
+
+class PermissionOperation(Enum):
+    CHMOD = "chmod"
+    FCHMOD = "fchmod"
+    FCHMODAT = "fchmodat"
+
+@dataclass
+class PermissionInfo:
+    """
+    chmod/fchmod system call
+    Each entry describes a variable in chmod/fchmod system call changing permissions
+
+    Structure:
+        The chmod() and fchmod() system calls change a file's mode bits.
+
+        Depreciated for fchmodat in newer 64-bit systems
+        chmod(const char *path, mode_t mode) = return value (returns success (0) or error (-1))
+        chmod("file", 0644) = 0
+
+        Follows openat syscall to change mode of open file
+        fchmod(int fd, mode_t mode) = return value (returns success (0) or error (-1))
+        fchmod(3, 0644) = 0
+
+        Standard chmod default syscall. Follows execve syscall calling chmod binary
+        fchmodat(int dirfd, const char *path, mode_t mode, int flags) = return value (returns success (0) or error (-1))
+        fchmodat(AT_FDCWD, "file.txt", 0644) = 0
+
+    See https://man7.org/linux/man-pages/man2/chmod.2.html for more information on chmod/fchmod calls
+    """
+    operation: PermissionOperation
+    mode: int
+    ret_val: int
+    pid: int | None = None
+    fd: int | None = None
+    dirfd: str | None = None
+    path: str | None = None
+    flags: list[str] | None = None
+
+
+class FDDuplicationOperation(Enum):
+    DUP = "dup"
+    DUP2 = "dup2"
+    DUP3 = "dup3"
+
+@dataclass
+class FDDuplication:
+    """
+    dup/dup2/dup3 system call
+    Each entry descibes a variable in dup/dup2/dup3 system call duplication file descriptors
+
+    Structure:
+        Allocates a new file descriptor that refers to the same open file description as the descriptor oldfd.
+
+        Uses the lowest fd available as newfd
+        dup(int oldfd) = return value (returns new fd or error (-1))
+        dup(3) = 0
+
+        Uses the file descriptor passed as newfd
+        dup2(int oldfd, int newfd) = return value (returns new fd or error (-1))
+        dup2(3, 0) = 0
+
+        Uses the file descriptor passed as newfd with flags passed
+        dup3(int oldfd, int newfd, int flags) = return value (returns new fd or error (-1))
+        dup3(3, 0, O_CLOEXEC) = 0
+
+    See https://man7.org/linux/man-pages/man2/dup.2.html for more information on dup/dup2/dup3 calls
+    """
+    operation: FDDuplicationOperation
+    oldfd: int
+    ret_value: int
+    pid: int | None = None
+    newfd: int | None = None
+    flags: list[str] | None = None
+
+
+class PrivilegeOperation(Enum):
+    SETUID = "setuid"
+    SETGID = "setgid"
+    SETREUID = "setreuid"
+    SETREGID = "setregid"
+
+@dataclass
+class PrivilegeInfo:
+    """
+    setuid/setgid/setreuid system call
+    Each entry descibes a variable in setuid/setgid/setreuid system call to set real or effective user/group id
+
+    Structure:
+        Sets the effective user ID of the calling process.
+        setuid(uid_t uid) = return value (returns success (0) or error (-1))
+        setuid(0) = 0
+
+        Sets the effective group ID of the calling process.
+        setgid(gid_t gid) = return value (returns success (0) or error (-1))
+        setgid(0) = 0
+
+        Sets real and effective user IDs of the calling process.
+        setreuid(uid_t ruid, uid_t euid) = return value (returns success (0) or error (-1))
+        setreuid(1000, 1000) = 0
+
+        setregid(gid_t rgid, gid_t egid) = return value (returns success (0) or error (-1))
+        setregid(1000, 1000) = 0
+
+    See https://man7.org/linux/man-pages/man2/setuid.2.html for more information on setuid calls
+    """
+    operation: PrivilegeOperation
+    ret_val: int
+    pid: int | None = None
+    uid: int | None = None
+    gid: int | None = None
+    ruid: int | None = None
+    euid: int | None = None
+    rgid: int | None = None
+    egid: int | None = None
+    
+
+class PTraceOperation(Enum):
+    PTRACE = "ptrace"
+
+@dataclass
+class PTraceInfo:
+    """
+    ptrace system call
+    Each entry descibes a variable in ptrace system call to trace tracee process
+
+    Structure:
+        System call provides a means by which one process (the "tracer") may observe and control the execution of another process (the "tracee"), and examine and change the tracee's memory and registers.
+        ptrace(enum __ptrace_request op, pid_t pid, void *addr, void *data) = return value (return value dependent of flag used, success (0), or error (-1))
+        ptrace(PTRACE_ATTACH, target_pid, ...) or ptrace(PTRACE_TRACEME, ...)
+        ptrace(PTRACE_ATTACH, 12345, NULL, NULL) = 0
+
+    See https://man7.org/linux/man-pages/man2/ptrace.2.html for more information on ptrace calls
+    """
+    operation: PTraceOperation
+    op: str
+    t_pid: int
+    ret_val: int
+    pid: int | str | None = None
+    addr: str | None = None # Verify sample addr
+    data: str | None = None # Verify sample data
+
 
 
 @dataclass
