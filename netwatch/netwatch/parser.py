@@ -4,6 +4,7 @@ Parse strace output for analyzing
 
 import re
 import logging
+from typing import Any
 from .models import (
     SocketInfo, 
     SocketOperation,
@@ -30,17 +31,254 @@ from .models import (
     PrivilegeInfo,
     PrivilegeOperation,
     PTraceInfo,
-    PTraceOperation
+    PTraceOperation,
+    Token
 )
+from .exceptions import ParserError, LexerError
 
 
 logger = logging.getLogger(__name__)
 
 
+class Peekable:
+    """A wrapper for iterators that allows looking ahead one token."""
+    def __init__(self, iterable):
+        self.it = iter(iterable)
+        self.peeked = None
+
+    def __str__(self):
+        if self.peeked:
+            return f"Next item: {self.peeked[0]}"
+        return f"Next item: {self.it[0]}"
+
+    def peek(self):
+        if self.peeked is None:
+            try:
+                self.peeked = [next(self.it)]
+            except StopIteration:
+                self.peeked = []
+        return self.peeked[0] if self.peeked else None
+
+    def __next__(self):
+        if self.peeked:
+            val = self.peeked.pop(0)
+            if not self.peeked:
+                self.peeked = None
+            return val
+        return next(self.it)
+
+    def __bool__(self):
+        return self.peek() is not None
+
+
 class SyscallParser:
-    def __init__(self, default_pid:int = 0):
+    TOKEN_SPECIFICATIONS: list[tuple[str, str]] = [
+        ("HEX", r'0x[0-9a-fA-F]+'),
+        ("NUMBER", r'-?\d+'),
+        ("STRING", r'"[^"]*"'),
+        ("LBRACKET", r'\['),
+        ("RBRACKET", r'\]'),
+        ("LBRACE", r'\{'),
+        ("RBRACE", r'\}'),
+        ("LPAREN", r'\('),
+        ("RPAREN", r'\)'),
+        ("EQUALS", r'='),
+        ("COMMA", r','),
+        ("COMMENT", r'\/\*.*?\*\/'),           # C-style comments (e.g. /* 24 vars */)
+        ("ID", r'[a-zA-Z0-9_|]+'),             # Identifiers, constants, signal names
+        ("SKIP", r'[ \t\n]+'),                 # Ignore spaces and tabs
+        ("ELLIPSIS", r'\.\.\.'),               # Truncation ellipsis
+        ("MISMATCH", r'.')                     # Catch everything else
+    ]              
+
+    def __init__(self, default_pid: int = 0):
         self.default_pid = default_pid # Default set for single process traces
 
+    def tokenize(self, line: str) -> list[Token]:
+        """
+        Scans text and returns a list of Token objects
+        """
+        tok_regex = "|".join(f"(?P<{name}>{pattern})" for name, pattern in self.TOKEN_SPECIFICATIONS)
+        tokens = []
+        for tok in re.finditer(tok_regex, line):
+            kind = tok.lastgroup
+            value = tok.group()
+            if kind == "SKIP":
+                continue
+            elif kind == "MISMATCH":
+                raise LexerError(f"Unexpected token/character: {value!r}")
+            
+            tokens.append(Token(kind, value))
+        
+        return tokens
+
+    def parse_outer_syscall(self, line: str) -> tuple[str, str, int]:
+        """
+        Parses the outer structure of a system call: name(args) = ret_val
+        """
+        match = re.match(r'^([a-z0-9_]+)\((.*)\)\s*=\s*(-?\d+|0x[0-9a-fA-F]+)(?: .*)?$', line, flags=re.DOTALL)
+        if not match:
+            raise ParserError("parser", f"Failed to parse outer syscall structure: {line}")
+            
+        syscall_name = match.group(1)
+        raw_args = match.group(2)
+        ret_val_str = match.group(3)
+        
+        if ret_val_str.startswith("0x"):
+            ret_val = int(ret_val_str, 16)
+        else:
+            ret_val = int(ret_val_str)
+            
+        return syscall_name, raw_args, ret_val
+
+    def _parse_value(self, it: Peekable) -> Any:
+        """Recursively parses a token stream into native Python structures."""
+
+        token = next(it, None)
+
+        if not token:
+            raise ParserError("parser", "Unexpected end of input")
+            
+        if token.type == "LBRACE":
+            # Parse struct: {key=value, key2=value2, ...}
+            d = {}
+            while True:
+                peek_tok = it.peek()
+                if not peek_tok or peek_tok.type == "RBRACE":
+                    break
+
+                if peek_tok.type == "ELLIPSIS":
+                    next(it)
+                    d["..."] = "..."
+                    comma_tok = it.peek()
+                    if comma_tok and comma_tok.type == "COMMA":
+                        next(it)
+                    continue
+
+                key_tok = next(it)
+                if key_tok.type != "ID":
+                    raise ParserError("parser", f"Expected key identifier in struct, got {key_tok.value}")
+                key = key_tok.value
+                
+                eq_tok = next(it, None)
+                if not eq_tok or eq_tok.type != "EQUALS":
+                    raise ParserError("parser", f"Expected '=' after key '{key}'")
+                    
+                val = self._parse_value(it)
+                d[key] = val
+                
+                comma_tok = it.peek()
+                if comma_tok and comma_tok.type == "COMMA":
+                    next(it)
+            
+            rbrace = next(it, None)
+            if not rbrace or rbrace.type != "RBRACE":
+                raise ParserError("parser", "Expected '}' at end of struct")
+            return d
+            
+        elif token.type == "LBRACKET":
+            # Parse list: [value, value2, ...]
+            lst = []
+            while True:
+                peek_tok = it.peek()
+                if not peek_tok or peek_tok.type == "RBRACKET":
+                    break
+                
+                if peek_tok.type == "COMMENT":
+                    comment_tok = next(it)
+                    lst.append(comment_tok.value)
+                elif peek_tok.type == "ELLIPSIS":
+                    next(it)
+                    lst.append("...")
+                else:
+                    val = self._parse_value(it)
+                    lst.append(val)
+                
+                comma_tok = it.peek()
+                if comma_tok and comma_tok.type == "COMMA":
+                    next(it)
+            
+            rbracket = next(it, None)
+            if not rbracket or rbracket.type != "RBRACKET":
+                raise ParserError("parser", "Expected ']' at end of list")
+            return lst
+            
+        elif token.type == "ID":
+            # Check if this is a function call wrapper (e.g. htons(5555))
+            peek_token = it.peek()
+            if peek_token and peek_token.type == "LPAREN":
+                func_name = token.value
+                next(it) # consume LPAREN
+                
+                func_args = []
+                while True:
+                    p_tok = it.peek()
+                    if not p_tok or p_tok.type == "RPAREN":
+                        break
+
+                    val = self._parse_value(it)
+                    func_args.append(val)
+                    
+                    comma_tok = it.peek()
+                    if comma_tok and comma_tok.type == "COMMA":
+                        next(it)
+                
+                rparen = next(it, None)
+                if not rparen or rparen.type != "RPAREN":
+                    raise ParserError("parser", f"Expected ')' at end of function '{func_name}'")
+                
+                # Semantic unwrapping of standard wrapper functions
+                if func_name == "htons" and func_args:
+                    return func_args[0]
+                elif func_name in ("inet_addr", "inet_pton") and func_args:
+                    return func_args[-1]  # IP string
+                else:
+                    args_str = ", ".join(repr(a) for a in func_args)
+                    return f"{func_name}({args_str})"
+            elif peek_token and peek_token.type == "EQUALS":
+                key = token.value
+                next(it) # consume EQUALS
+                val = self._parse_value(it)
+                return f"{key}={val}"
+            else:
+                return token.value
+                
+        elif token.type == "NUMBER":
+            # Handle octal literals (permission modes like 0644)
+            if token.value.startswith("0") and len(token.value) > 1:
+                try:
+                    return int(token.value, 8)
+                except ValueError:
+                    pass
+            return int(token.value)
+            
+        elif token.type == "HEX":
+            return int(token.value, 16)
+            
+        elif token.type == "STRING":
+            return token.value[1:-1] # strip double quotes
+            
+        elif token.type == "COMMENT":
+            return token.value
+            
+        elif token.type == "ELLIPSIS":
+            return "..."
+            
+        else:
+            raise ParserError("parser", f"Unexpected token type '{token.type}' with value: {token.value}")
+
+    def parse_arguments(self, tokens: list[Token]) -> list[Any]:
+        """Parses a complete list of comma-separated tokens."""
+        it = Peekable(tokens)
+        args = []
+        while it:
+            val = self._parse_value(it)
+            args.append(val)
+            
+            comma_tok = it.peek()
+            if comma_tok and comma_tok.type == "COMMA":
+                next(it)
+        return args
 
     def parse_line(self, line: str) -> ParserEvent:
         """
@@ -52,555 +290,380 @@ class SyscallParser:
         pid_pattern = r'^(\d+|\[\d+\]|\[pid\s+\d+\])\s+(.*)'
         pid_match = re.search(pid_pattern, clean_line, flags=re.DOTALL)
 
-
         if pid_match:
             pid_str, clean_line = pid_match.groups()
-            pid = int(re.sub(r'\D', '', pid_str)) # sub anythin that is not a digit
+            pid = int(re.sub(r'\D', '', pid_str)) # sub anything that is not a digit
 
-        event = self._parse_syscall(clean_line, pid)
-
-        return event
-
+        return self._parse_syscall(clean_line, pid)
 
     def _parse_syscall(self, line: str, pid: int) -> ParserEvent:
         """
         Helper method to route line to proper parser
         """
-        syscall_pattern = r'^([a-z0-9_]+)\('
-        match = re.search(syscall_pattern, line)
+        try:
+            syscall_name, raw_args, ret_val = self.parse_outer_syscall(line)
+        except ParserError:
+            raise ParserError("parser", f"Failed to identify system call prefix: {line}")
 
-        if not match:
-            raise ValueError(f"[PARSER ERROR] Regex unable to identify system call prefix: {line}")
-
-        syscall_name = match.group(1)
+        try:
+            tokens = self.tokenize(raw_args)
+            args = self.parse_arguments(tokens)
+        except LexerError as e:
+            raise ParserError("parser", f"Lexer error: {e}")
+        except ParserError as e:
+            raise ParserError("parser", f"Parser error: {e}")
 
         match syscall_name:
             case "socket":
-                return self.parse_socket(line, pid)
+                return self.parse_socket(args, ret_val, pid)
             
             case "connect" | "bind" | "listen" | "accept" | "accept4":
-                return self.parse_connection(syscall_name, line, pid)
+                return self.parse_connection(syscall_name, args, ret_val, pid)
                 
             case "read" | "write":
-                return self.parse_data(syscall_name, line, pid)
+                return self.parse_data(syscall_name, args, ret_val, pid)
 
             case "execve":
-                return self.parse_procexec(line, pid)
+                return self.parse_procexec(args, ret_val, pid)
                 
             case "open" | "openat" | "unlink" | "unlinkat":
-                return self.parse_file_access(syscall_name, line, pid)
+                return self.parse_file_access(syscall_name, args, ret_val, pid)
                 
             case "fork" | "clone" | "vfork" | "clone3":
-                return self.parse_fork(syscall_name, line, pid)
+                return self.parse_fork(syscall_name, args, ret_val, pid)
                 
             case "chmod" | "fchmod" | "fchmodat":
-                return self.parse_permission(syscall_name, line, pid)
+                return self.parse_permission(syscall_name, args, ret_val, pid)
 
             case "dup" | "dup2" | "dup3":
-                return self.parse_fd_dup(syscall_name, line, pid)
+                return self.parse_fd_dup(syscall_name, args, ret_val, pid)
 
             case "setuid" | "setgid" | "setreuid" | "setregid":
-                return self.parse_privilege(syscall_name, line, pid)
+                return self.parse_privilege(syscall_name, args, ret_val, pid)
             
             case "ptrace":
-                return self.parse_ptrace(line, pid)
+                return self.parse_ptrace(args, ret_val, pid)
 
             case "close":
-                return self.parse_close(line, pid)
+                return self.parse_close(args, ret_val, pid)
                 
             case _:
-                raise ValueError(f"[PARSER ERROR] No parser registered for system call: {syscall_name}")
+                raise ParserError("parser", f"No parser registered for system call: {syscall_name}")
 
-
-    def parse_socket(self, line: str, pid: int) -> SocketInfo:
+    def parse_socket(self, args: list[Any], ret_val: int, pid: int) -> SocketInfo:
         """
         Parse socket operations
-
-        Example: socket(PF_INET, SOCK_STREAM, IPPROTO_TCP) = 3
         """
-        pattern = r'socket\(([^,]+),\s*([^,]+),\s*([^,]+)\)\s+=\s+(-?\d+)'
-        match = re.match(pattern, line)
-
-        if match:
-            family, sock_type, protocol, fd = match.groups()
-
-            return SocketInfo(
-                operation=SocketOperation.SOCKET,
-                domain=SocketDomain(family), 
-                type=SocketType(sock_type), 
-                protocol=SocketProtocol(protocol), 
-                fd=int(fd),
-                pid=pid
-            )
+        if len(args) < 3:
+            raise ParserError("socket", f"Missing arguments: expected 3, got {len(args)}")
         
-        raise ValueError(f"[SOCKET PARSER ERROR] Regex unable to parse socket info: {line}")
+        return SocketInfo(
+            operation=SocketOperation.SOCKET,
+            domain=SocketDomain(args[0]), 
+            type=SocketType(args[1]), 
+            protocol=SocketProtocol(args[2]), 
+            fd=ret_val,
+            pid=pid
+        )
 
-
-    def parse_connection(self, syscall: str, line: str, pid: int) -> ConnectionInfo:
+    def parse_connection(self, syscall: str, args: list[Any], ret_val: int, pid: int) -> ConnectionInfo:
         """
         Parse connection operations
-
-        Example:
-            - connect(3, {sa_family=AF_INET, sin_port=htons(5555), sin_addr=inet_addr("192.168.10.1")}, 16) = 0
-            - bind(4, {sa_family=AF_INET, sin_port=htons(4444), sin_addr=inet_addr("60.10.15.1")}, 16) = 0
-            - listen(3, 128) = 0
-            - accept(3, {sa_family=AF_INET, sin_port=htons(4444), sin_addr=inet_addr("60.10.15.1")}, 16) = 4
-            - accept4(3, {sa_family=AF_INET, sin_port=htons(4444), sin_addr=inet_addr("60.10.15.1")}, 16, SOCK_NONBLOCK) = 4
         """
-        match syscall:
-            case "connect" | "bind" | "accept":
-                pattern = r'[a-z]+\((\d+),\s*\{.+=(.+),\s*.+=.+\((\d+)\),\s*.+=.+\("(\d{1,3}.\d{1,3}.\d{1,3}.\d{1,3})"\)\},\s*(\d+)\)\s*=\s*(-?\d+)'
-                match = re.match(pattern, line)
-
-                if match:
-                    sockfd, family, port, ip, addrlen, ret_val = match.groups()
-
-                    return ConnectionInfo(
-                        operation=ConnectionOperation(syscall),
-                        sockfd=int(sockfd), 
-                        addr={
-                            "sa_family": family,
-                            "sin_port": int(port),
-                            "sin_addr": ip
-                        },
-                        addrlen=int(addrlen),
-                        ret_val=int(ret_val),
-                        pid=pid
-                    )
+        if syscall == "listen":
+            if len(args) < 2:
+                raise ParserError("connection", f"listen requires 2 arguments, got {len(args)}")
+            return ConnectionInfo(
+                operation=ConnectionOperation.LISTEN,
+                sockfd=args[0],
+                backlog=args[1],
+                ret_val=ret_val,
+                pid=pid
+            )
+            
+        if len(args) < 3:
+            raise ParserError("connection", f"{syscall} requires at least 3 arguments, got {len(args)}")
+            
+        addr = args[1]
+        addrlen = args[2]
+        flags = None
+        
+        if len(args) > 3 and args[3]:
+            if isinstance(args[3], str):
+                flags = [f.strip() for f in args[3].split("|")]
                 
-                raise ValueError(f"[CONNECTION PARSER ERROR] Failed to parse {line}")
+        return ConnectionInfo(
+            operation=ConnectionOperation(syscall),
+            sockfd=args[0],
+            addr=addr if isinstance(addr, dict) else None,
+            addrlen=addrlen,
+            flags=flags,
+            ret_val=ret_val,
+            pid=pid
+        )
 
-            case "listen":
-                pattern = r'[a-z]+\((\d+),\s+(\d+)\)\s+=\s(-?\d+)'
-                match = re.match(pattern, line)
-
-                if match:
-                    sockfd, backlog, ret_val = match.groups()
-                    return ConnectionInfo(
-                        operation=ConnectionOperation(syscall),
-                        sockfd=int(sockfd),
-                        backlog=int(backlog),
-                        ret_val=int(ret_val),
-                        pid=pid
-                    )
-
-                raise ValueError(f"[CONNECTION PARSER ERROR] Failed to parse {line}")
-
-            case "accept4":
-                pattern = r'[a-z]+\((\d+),\s*\{.+=(.+),\s*.+=.+\((\d+)\),\s*.+=.+\("(\d{1,3}.\d{1,3}.\d{1,3}.\d{1,3})"\)\},\s*(\d+),\s*([A-Z0-9_|]+)\)\s*=\s*(-?\d+)'
-                match = re.match(pattern, line)
-
-                if match:
-                    sockfd, family, port, ip, addrlen, flags, ret_val = match.groups()
-                    return ConnectionInfo(
-                        operation=ConnectionOperation(syscall),
-                        sockfd=int(sockfd),
-                        addr={
-                            "sa_family": family,
-                            "sin_port": int(port),
-                            "sin_addr": ip
-                        },
-                        addrlen=int(addrlen),
-                        flags=flags.split("|"),
-                        ret_val=int(ret_val),
-                        pid=pid
-                    )
-
-                raise ValueError(f"[CONNECTION PARSER ERROR] Failed to parse {line}")
-
-            case _:
-                raise ValueError(f"{syscall} not parsable connection system call")
-
-        raise ValueError(f"[CONNECTION PARSER ERROR] Regex unable to parse connection info: {line}")
-
-
-    def parse_data(self, syscall: str, line: str, pid: int) -> DataTransfer:
+    def parse_data(self, syscall: str, args: list[Any], ret_val: int, pid: int) -> DataTransfer:
         """
         Parse Data Transfer operations
-
-        Examples:  
-            - write(3, "Hello World!\n", 13) = 13
-            - read(3, "Boo!\n", 2048) = 5
         """
-        pattern = r'[a-z]+\((\d+),\s*"([^"]*)",\s*(\d+)\)\s*=\s*(-?\d+)'
-        match = re.match(pattern, line)
-        
-        if match:
-            fd, data, bytes_requested, bytes_transferred = match.groups()
-            return DataTransfer(
-                operation=DataTransferOperation(syscall), 
-                fd=int(fd), 
-                data=data, 
-                bytes_requested=int(bytes_requested), 
-                bytes_transferred=int(bytes_transferred),
-                pid=pid
-            )
+        if len(args) < 3:
+            raise ParserError("data transfer", f"Missing arguments: expected 3, got {len(args)}")
+        return DataTransfer(
+            operation=DataTransferOperation(syscall), 
+            fd=args[0], 
+            data=args[1], 
+            bytes_requested=args[2], 
+            bytes_transferred=ret_val,
+            pid=pid
+        )
 
-        raise ValueError(f"[DATA TRANSFER PARSER ERROR] Regex unable to parse data transfer: {line}")
-
-
-    def parse_procexec(self, line: str, pid: int) -> ProcessExec:
+    def parse_procexec(self, args: list[Any], ret_val: int, pid: int) -> ProcessExec:
         """
-        Parse Process Exec (Process executing another process)
-
-        Structure examples:
-            - execve("/usr/bin/bash", ["/usr/bin/bash"], 0x7fffc2c935f0 /* 152 vars */) = 0
-            - execve("/bin/sh", ["sh", "-i"], [/* 24 vars */]) = 0
+        Parse Process Exec
         """
-        pattern = r'execve\("([^"]+)",\s*\[(.*)\],\s*(.*?)\)\s*=\s*(-?\d+)'
-        match = re.match(pattern, line)
-        
-        if match:
-            pathname, args_raw, envp_raw, ret_val = match.groups()
-            args = [a.strip('"') for a in args_raw.split(", ")] if args_raw else []
+        if len(args) < 3:
+            raise ParserError("process exec", f"Missing arguments: expected 3, got {len(args)}")
+            
+        raw_args = args[1]
+        if isinstance(raw_args, list):
+            argv = [str(a) for a in raw_args]
+        else:
+            argv = [str(raw_args)]
+            
+        return ProcessExec(
+            operation=ProcessExecOperation.EXECVE,
+            pathname=args[0],
+            args=argv,
+            envp=args[2],
+            ret_val=ret_val,
+            pid=pid
+        )
 
-            return ProcessExec(
-                operation=ProcessExecOperation.EXECVE,
-                pathname=pathname,
-                args=args,
-                envp=envp_raw,
-                ret_val=int(ret_val),
-                pid=pid
-            )
-        
-        raise ValueError(f"[PROCESS EXEC PARSER ERROR] Regex unable to parse process exec: {line}")
-
-
-    def parse_file_access(self, syscall: str, line: str, pid: int) -> FileAccess:
+    def parse_file_access(self, syscall: str, args: list[Any], ret_val: int, pid: int) -> FileAccess:
         """
         Parse File Access operations
-
-        Examples:
-            - open("/etc/passwd", O_RDONLY) = 3
-            - openat(AT_FDCWD, "/tmp/payload", O_WRONLY|O_CREAT) = 4
-            - unlink("/tmp/payload") = 0
-            - unlinkat(AT_FDCWD, "example.txt", 0) = 0
         """
-        match syscall:
-            case "open":
-                pattern = r'[a-z]+\("([^"]+)",\s*([A-Z_|]+)\)\s+=\s+(-?\d+)'
-                match = re.match(pattern, line)
+        if syscall == "open":
+            if len(args) < 2:
+                raise ParserError("file access", f"open requires at least 2 arguments, got {len(args)}")
+            flags_val = args[1]
+            flags = [f.strip() for f in flags_val.split("|")] if isinstance(flags_val, str) else []
+            return FileAccess(
+                operation=FileAccessOperation.OPEN,
+                path=args[0],
+                flags=flags,
+                ret_val=ret_val,
+                pid=pid
+            )
+            
+        elif syscall == "unlink":
+            if len(args) < 1:
+                raise ParserError("file access", f"unlink requires 1 argument, got {len(args)}")
+            return FileAccess(
+                operation=FileAccessOperation.UNLINK,
+                path=args[0],
+                ret_val=ret_val,
+                pid=pid
+            )
+            
+        elif syscall == "openat":
+            if len(args) < 3:
+                raise ParserError("file access", f"openat requires at least 3 arguments, got {len(args)}")
+            flags_val = args[2]
+            flags = [f.strip() for f in flags_val.split("|")] if isinstance(flags_val, str) else []
+            return FileAccess(
+                operation=FileAccessOperation.OPENAT,
+                dirfd=str(args[0]),
+                path=args[1],
+                flags=flags,
+                ret_val=ret_val,
+                pid=pid
+            )
+            
+        elif syscall == "unlinkat":
+            if len(args) < 3:
+                raise ParserError("file access", f"unlinkat requires at least 3 arguments, got {len(args)}")
+            flags_val = args[2]
+            flags = [f.strip() for f in flags_val.split("|")] if isinstance(flags_val, str) else []
+            return FileAccess(
+                operation=FileAccessOperation.UNLINKAT,
+                dirfd=str(args[0]),
+                path=args[1],
+                flags=flags,
+                ret_val=ret_val,
+                pid=pid
+            )
+            
+        raise ParserError("file access", f"Unknown syscall: {syscall}")
 
-                if match:
-                    path, flags, ret_val = match.groups()
-
-                    return FileAccess (
-                        operation=FileAccessOperation(syscall),
-                        path=path,
-                        flags=[flag.strip('"') for flag in flags.split("|")],
-                        ret_val=int(ret_val),
-                        pid=pid
-                    )
-
-                raise ValueError(f"[FILE ACCESS PARSER ERROR] Regex unable to parse file access details: {line}")
-
-            case "unlink":
-                pattern = r'[a-z]+\("([^"]+)\)\s+=\s+(-?\d+)'
-                match = re.match(pattern, line)
-
-                if match:
-                    path, ret_val = match.groups()
-
-                    return FileAccess(
-                        operation=FileAccessOperation(syscall),
-                        path=path,
-                        ret_val=int(ret_val),
-                        pid=pid
-                    )
-                
-                raise ValueError(f"[FILE ACCESS PARSER ERROR] Regex unable to parse file access details: {line}")
-
-            case "openat" | "unlinkat":
-                pattern = r'[a-z]+\(([^,]+),\s*"([^"]+)",\s*([A-Z_|]+)\)\s*=\s*(-?\d+)'
-                match = re.match(pattern, line)
-                
-                if match:
-                    dirfd, path, flags, ret_fd = match.groups()
-
-                    return FileAccess(
-                        operation=FileAccessOperation(syscall),
-                        dirfd=dirfd,
-                        path=path, 
-                        flags=[flag.strip('"') for flag in flags.split("|")],
-                        ret_val=int(ret_fd),
-                        pid=pid
-                    )
-
-                raise ValueError(f"[FILE ACCESS PARSER ERROR] Regex unable to parse file access details: {line}")
-
-        raise ValueError(f"[FILE ACCESS PARSER ERROR] Unable to parse file access: {line}")
-
-    
-    def parse_fork(self, syscall: str, line: str, pid: int) -> ProcessFork:
+    def parse_fork(self, syscall: str, args: list[Any], ret_val: int, pid: int) -> ProcessFork:
         """
         Parse fork/clone system calls
-
-        Example: 
-            - 1000  clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|SIGCHLD, ...) = 1001
-            - 1000  fork() = 1001
         """
-        pattern = r'[a-z0-9]+\(.*\)\s+=\s+(-?\d+)'
-        match = re.match(pattern, line)
+        return ProcessFork(
+            operation=ForkOperation(syscall),
+            parent_pid=pid,
+            child_pid=ret_val,
+            pid=pid
+        )
 
-        if match:
-            child_pid = match.group(1)
-            return ProcessFork(
-                operation=ForkOperation(syscall),
-                parent_pid=pid,
-                child_pid=int(child_pid),
-                pid=pid
-            )   
-
-        raise ValueError(f"[FORK/CLONE PARSER ERROR] Unable to parse fork/clone: {line}")
-
-
-    def parse_close(self, line: str, pid: int) -> SyscallClose:
+    def parse_close(self, args: list[Any], ret_val: int, pid: int) -> SyscallClose:
         """
         Parse close operation
-
-        Example: close(3) = 0
         """
-        pattern = r'close\((\d+)\)\s*=\s*(-?\d+)'
-        match = re.match(pattern, line)
-        
-        if match:
-            fd, ret_val = match.groups()
+        if len(args) < 1:
+            raise ParserError("close", f"close requires 1 argument, got {len(args)}")
+        return SyscallClose(
+            operation=SyscallCloseOperation.CLOSE,
+            fd=args[0], 
+            ret_val=ret_val,
+            pid=pid
+        )
 
-            return SyscallClose(
-                operation=SyscallCloseOperation.CLOSE,
-                fd=int(fd), 
-                ret_val=int(ret_val),
+    def parse_permission(self, syscall: str, args: list[Any], ret_val: int, pid: int) -> PermissionInfo:
+        """
+        Parse permission operations
+        """
+        if syscall == "chmod":
+            if len(args) < 2:
+                raise ParserError("permission", f"chmod requires 2 arguments, got {len(args)}")
+            return PermissionInfo(
+                operation=PermissionOperation.CHMOD,
+                path=args[0],
+                mode=args[1],
+                ret_val=ret_val,
                 pid=pid
             )
-
-        raise ValueError(f"[CLOSE PARSER ERROR] Regex unable to parse close: {line}")
-
-
-    def parse_permission(self, syscall: str, line: str, pid: int) -> PermissionInfo:
-        """
-        Parse permission operation
-
-        Example:
-            - chmod("file", 0644) = 0
-            - fchmod(3, 0644) = 0
-            - fchmodat(AT_FDCWD, "file.txt", 0644) = 0
-        """
-        match syscall:
-            case "chmod":
-                pattern = r'[a-z]+\("([^"]+)",\s*(\d+)\)\s+=\s+(-?\d+)'
-                match = re.match(pattern, line)
-
-                if match:
-                    path, mode, ret_val = match.groups()
-
-                    return PermissionInfo(
-                        operation=PermissionOperation(syscall),
-                        path=path,
-                        mode=int(mode, 8),
-                        ret_val=int(ret_val),
-                        pid=pid
-                    )
-
-                raise ValueError(f"[PERMISSION PARSER ERROR] Regex unable to parse chmod: {line}")
             
-            case "fchmod":
-                pattern = r'[a-z]+\((\d+),\s*(\d+)\)\s+=\s+(-?\d+)'
-                match = re.match(pattern, line)
-
-                if match:
-                    fd, mode, ret_val = match.groups()
-
-                    return PermissionInfo(
-                        operation=PermissionOperation(syscall),
-                        fd=int(fd),
-                        mode=int(mode, 8),
-                        ret_val=int(ret_val),
-                        pid=pid
-                    )
-                
-                raise ValueError(f"[PERMISSION PARSER ERROR] Regex unable to parse fchmod: {line}")
-            
-            case "fchmodat":
-                pattern = r'[a-z]+\(([^,]+),\s*"([^"]+)",\s*(\d+)(?:,\s*([A-Z_|]+))?\)\s+=\s+(-?\d+)'
-                match = re.match(pattern, line)
-
-                if match:
-                    dirfd, path, mode, flags, ret_val = match.groups()
-
-                    return PermissionInfo(
-                        operation=PermissionOperation(syscall),
-                        dirfd=dirfd,
-                        path=path,
-                        mode=int(mode, 8),
-                        flags=[flag.strip('"') for flag in flags.split("|")],
-                        ret_val=int(ret_val),
-                        pid=pid
-                    )
-                
-                raise ValueError(f"[PERMISSION PARSER ERROR] Regex unable to parse fchmodat: {line}")
-            
-        raise ValueError(f"[PERMISSION PARSER ERROR] Regex unable to parse permission: {line}")
-
-
-    def parse_fd_dup(self, syscall: str, line: str, pid: int) -> FDDuplication:
-        """
-        Parse fd duplication operation
-
-        Example: 
-            - dup(3) = 0
-            - dup2(3, 0) = 0
-            - dup3(3, 0, O_CLOEXEC) = 0
-        """
-        match syscall:
-            case "dup":
-                pattern = r'[a-z0-9]+\((\d+)\)\s+=\s+(-?\d+)'
-                match = re.match(pattern, line)
-
-                if match:
-                    oldfd, ret_val = match.groups()
-
-                    return FDDuplication(
-                        operation=FDDuplicationOperation(syscall),
-                        oldfd=int(oldfd),
-                        ret_value=int(ret_val),
-                        pid=pid
-                    )
-                
-                raise ValueError(f"[FD DUPLICATION PARSER ERRER] Regex unable to parse dup: {line}")
-
-            case "dup2":
-                pattern = r'[a-z0-9]+\((\d+),\s*(\d+)\)\s+=\s+(-?\d+)'
-                match = re.match(pattern, line)
-
-                if match:
-                    oldfd, newfd, ret_val = match.groups()
-
-                    return FDDuplication(
-                        operation=FDDuplicationOperation(syscall),
-                        oldfd=int(oldfd),
-                        newfd=int(newfd),
-                        ret_value=int(ret_val),
-                        pid=pid
-                    )
-                
-                raise ValueError(f"[FD DUPLICATION PARSER ERRER] Regex unable to parse dup2: {line}")
-
-            case "dup3":
-                pattern = r'[a-z0-9]+\((\d+),\s*(\d+),\s*([A-Z0-9_|]+)\)\s+=\s+(-?\d+)'
-                match = re.match(pattern, line)
-
-                if match:
-                    oldfd, newfd, flags, ret_val = match.groups()
-
-                    return FDDuplication(
-                        operation=FDDuplicationOperation(syscall),
-                        oldfd=int(oldfd),
-                        newfd=int(newfd),
-                        flags=[flag.strip('"') for flag in flags.split("|")],
-                        ret_value=int(ret_val),
-                        pid=pid
-                    )
-                
-                raise ValueError(f"[FD DUPLICATION PARSER ERRER] Regex unable to parse dup3: {line}")
-
-        raise ValueError(f"[FD DUPLICATION PARSER ERRER] Regex unable to parse duplication: {line}")
-
-
-
-    def parse_privilege(self, syscall: str, line: str, pid: int) -> PrivilegeInfo:
-        """
-        Parse privilege operation
-
-        Example: 
-            - setuid(0) = 0
-            - setgid(0) = 0
-            - setreuid(1000, 1000) = 0
-            - setregid(1000, 1000) = 0
-        """
-        match syscall:
-            case "setuid" | "setgid":
-                pattern = r'[a-z]+\((\d+)\)\s+=\s+(-?\d+)'
-                match = re.match(pattern, line)
-
-                if match:
-                    id, ret_val = match.groups()
-
-                    if syscall == "setuid":
-                        return PrivilegeInfo(
-                            operation=PrivilegeOperation(syscall),
-                            uid=int(id),
-                            ret_val=int(ret_val),
-                            pid=pid
-                        )
-                    elif syscall == "setgid":
-                        return PrivilegeInfo(
-                            operation=PrivilegeOperation(syscall),
-                            gid=int(id),
-                            ret_val=int(ret_val),
-                            pid=pid
-                        )
-                
-                raise ValueError(f"[PRIVILEGE PARSER ERROR] Regex unable to parse setuid/setgid: {line}")
-        
-            case "setreuid" | "setregid":
-                pattern = r'[a-z]+\((-?\d+),\s*(-?\d+)\)\s+=\s+(-?\d+)'
-                match = re.match(pattern, line)
-
-                if match:
-                    rid, eid, ret_val = match.groups()
-
-                    if syscall == "setreuid":
-                        return PrivilegeInfo(
-                            operation=PrivilegeOperation(syscall),
-                            ruid=int(rid),
-                            euid=int(eid),
-                            ret_val=int(ret_val),
-                            pid=pid
-                        )
-                    elif syscall == "setregid":
-                        return PrivilegeInfo(
-                            operation=PrivilegeOperation(syscall),
-                            rgid=int(rid),
-                            egid=int(eid),
-                            ret_val=int(ret_val),
-                            pid=pid
-                        )
-                
-                raise ValueError(f"[PRIVILEGE PARSER ERROR] Regex unable to parse setreuid/setregid: {line}")
-
-        raise ValueError(f"[PRIVILEGE PARSER ERROR] Regex unable to parse: {line}")
-
-
-    def parse_ptrace(self, line: str, pid: int) -> PTraceInfo:
-        """
-        Parse ptrace operation
-
-        Example: 
-            - ptrace(PTRACE_ATTACH, 12345, NULL, NULL) = 0
-            - ptrace(PTRACE_PEEKTEXT, 12345, 0x7fffc2c935f0, NULL) = 0xabcdef01
-            - ptrace(PTRACE_CONT, 12345, NULL, SIGINT) = 0
-            - ptrace(PTRACE_SETREGS, 12345, NULL, 0x7ffd587d60f0) = 0
-            - ptrace(PTRACE_POKETEXT, 12345, 0x7fffc2c935f0, 0x12345678) = 0
-        """
-        pattern = r'ptrace\(([^,]+),\s*(\d+),\s*([^,]+),\s*([^)]+)\)\s*=\s*(-?\d+|0x[0-9a-fA-F]+)(?: .*)?'
-        match = re.match(pattern, line)
-
-        if match:
-            op, t_pid, addr, data, ret_val_str = match.groups()
-            
-            if ret_val_str.startswith("0x"):
-                ret_val = int(ret_val_str, 16)
-            else:
-                ret_val = int(ret_val_str)
-
-            return PTraceInfo(
-                operation=PTraceOperation.PTRACE,
-                op=op,
-                t_pid=int(t_pid),
-                addr=addr if addr != "NULL" else None,
-                data=data if data != "NULL" else None,
+        elif syscall == "fchmod":
+            if len(args) < 2:
+                raise ParserError("permission", f"fchmod requires 2 arguments, got {len(args)}")
+            return PermissionInfo(
+                operation=PermissionOperation.FCHMOD,
+                fd=args[0],
+                mode=args[1],
                 ret_val=ret_val,
-                pid=int(pid)
+                pid=pid
             )
+            
+        elif syscall == "fchmodat":
+            if len(args) < 3:
+                raise ParserError("permission", f"fchmodat requires at least 3 arguments, got {len(args)}")
+            flags_val = args[3] if len(args) > 3 else None
+            flags = [f.strip() for f in flags_val.split("|")] if isinstance(flags_val, str) else []
+            return PermissionInfo(
+                operation=PermissionOperation.FCHMODAT,
+                dirfd=str(args[0]),
+                path=args[1],
+                mode=args[2],
+                flags=flags,
+                ret_val=ret_val,
+                pid=pid
+            )
+            
+        raise ParserError("permission", f"Unknown syscall: {syscall}")
 
-        raise ValueError(f"[PTRACE PARSER ERROR] Regex unable to parse ptrace: {line}")
+    def parse_fd_dup(self, syscall: str, args: list[Any], ret_val: int, pid: int) -> FDDuplication:
+        """
+        Parse fd duplication operations
+        """
+        if syscall == "dup":
+            if len(args) < 1:
+                raise ParserError("fd duplication", f"dup requires 1 argument, got {len(args)}")
+            return FDDuplication(
+                operation=FDDuplicationOperation.DUP,
+                oldfd=args[0],
+                ret_value=ret_val,
+                pid=pid
+            )
+            
+        elif syscall == "dup2":
+            if len(args) < 2:
+                raise ParserError("fd duplication", f"dup2 requires 2 arguments, got {len(args)}")
+            return FDDuplication(
+                operation=FDDuplicationOperation.DUP2,
+                oldfd=args[0],
+                newfd=args[1],
+                ret_value=ret_val,
+                pid=pid
+            )
+            
+        elif syscall == "dup3":
+            if len(args) < 3:
+                raise ParserError("fd duplication", f"dup3 requires 3 arguments, got {len(args)}")
+            flags_val = args[2]
+            flags = [f.strip() for f in flags_val.split("|")] if isinstance(flags_val, str) else []
+            return FDDuplication(
+                operation=FDDuplicationOperation.DUP3,
+                oldfd=args[0],
+                newfd=args[1],
+                flags=flags,
+                ret_value=ret_val,
+                pid=pid
+            )
+            
+        raise ParserError("fd duplication", f"Unknown syscall: {syscall}")
+
+    def parse_privilege(self, syscall: str, args: list[Any], ret_val: int, pid: int) -> PrivilegeInfo:
+        """
+        Parse privilege operations
+        """
+        if syscall == "setuid":
+            if len(args) < 1:
+                raise ParserError("privilege", f"setuid requires 1 argument, got {len(args)}")
+            return PrivilegeInfo(
+                operation=PrivilegeOperation.SETUID,
+                uid=args[0],
+                ret_val=ret_val,
+                pid=pid
+            )
+            
+        elif syscall == "setgid":
+            if len(args) < 1:
+                raise ParserError("privilege", f"setgid requires 1 argument, got {len(args)}")
+            return PrivilegeInfo(
+                operation=PrivilegeOperation.SETGID,
+                gid=args[0],
+                ret_val=ret_val,
+                pid=pid
+            )
+            
+        elif syscall == "setreuid":
+            if len(args) < 2:
+                raise ParserError("privilege", f"setreuid requires 2 arguments, got {len(args)}")
+            return PrivilegeInfo(
+                operation=PrivilegeOperation.SETREUID,
+                ruid=args[0],
+                euid=args[1],
+                ret_val=ret_val,
+                pid=pid
+            )
+            
+        elif syscall == "setregid":
+            if len(args) < 2:
+                raise ParserError("privilege", f"setregid requires 2 arguments, got {len(args)}")
+            return PrivilegeInfo(
+                operation=PrivilegeOperation.SETREGID,
+                rgid=args[0],
+                egid=args[1],
+                ret_val=ret_val,
+                pid=pid
+            )
+            
+        raise ParserError("privilege", f"Unknown syscall: {syscall}")
+
+    def parse_ptrace(self, args: list[Any], ret_val: int, pid: int) -> PTraceInfo:
+        """
+        Parse ptrace operations
+        """
+        if len(args) < 4:
+            raise ParserError("ptrace", f"ptrace requires 4 arguments, got {len(args)}")
+        return PTraceInfo(
+            operation=PTraceOperation.PTRACE,
+            op=args[0],
+            t_pid=args[1],
+            addr=str(args[2]) if args[2] != "NULL" else None,
+            data=str(args[3]) if args[3] != "NULL" else None,
+            ret_val=ret_val,
+            pid=pid
+        )

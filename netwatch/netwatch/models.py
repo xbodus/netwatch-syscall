@@ -26,7 +26,7 @@ Dataclasses for syscall data (SocketInfo, ConnectionInfo, DataTransfer)
 
 See https://man7.org/linux/man-pages/man1/strace.1.html for more information on strace
 """
-from typing import Any
+from typing import Any, NamedTuple
 from dataclasses import dataclass, field
 from enum import Enum 
 
@@ -189,7 +189,7 @@ class ProcessExec:
     operation: ProcessExecOperation
     pathname: str
     args: list[str] # args[0] is the name of the command being executed
-    envp: str
+    envp: list[str]
     ret_val: int
     pid: int | None = None
     mem_addr: str | None = None
@@ -447,3 +447,8 @@ class ProcessDetails:
     binary_path: str | None = None
     parent_pid: int | None = None
     child_pids: list[int] = field(default_factory=list)
+
+
+class Token(NamedTuple):
+    type: str
+    value: str
