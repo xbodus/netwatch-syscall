@@ -11,6 +11,7 @@ import logging
 from .parser import SyscallParser
 from .models import ParserEvent
 from .state import SyscallState
+from .exceptions import ParserError, LexerError, StateError
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,7 @@ def analyze_syscall_stream(q: Queue, event: Event, state: SyscallState = None) -
         try:
             parsed_data: ParserEvent = parser.parse_line(q.get(timeout=0.1))
             state.update(parsed_data)
-        except (Empty, ValueError) as e:
+        except (Empty, ParserError, LexerError, StateError) as e:
             if not isinstance(e, Empty):
                 logger.warning(f"[ERROR] Analyzer Error: {e}")
             continue

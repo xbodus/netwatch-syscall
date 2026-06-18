@@ -9,6 +9,13 @@ class ParserError(NetwatchError, ValueError):
         self.message = message
         super().__init__(f"[{self.parser.upper()} ERROR] {self.message}")
 
+class StateError(NetwatchError, ValueError):
+    """ Raised specifically when a system call log line cannot be parsed"""
+    def __init__(self, name, message):
+        self.name = name
+        self.message = message
+        super().__init__(f"[{self.name.upper()} ERROR] {self.message}")
+
 class LexerError(NetwatchError, ValueError):
     """ Raised specifically when lexical tokenizer fails"""
     pass

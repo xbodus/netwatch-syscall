@@ -148,7 +148,7 @@ class BaseParser:
             case _:
                 raise ParserError("parser", f"Unexpected token type '{token.type}' with value: {token.value}")
 
-    def _handle_lbrace(self, it: Peekable) -> dict:
+    def _handle_lbrace(self, it: Peekable) -> dict[str, Any]:
         """Parse struct: {key=value, key2=value2, ...}"""
         d = {}
         while True:
@@ -186,7 +186,7 @@ class BaseParser:
 
         return d
             
-    def _handle_lbracket(self, it: Peekable) -> list:
+    def _handle_lbracket(self, it: Peekable) -> list[Any]:
         """Parse list: [value, value2, ...]"""
         lst = []
         while True:
@@ -267,38 +267,6 @@ class SyscallParser(BaseParser):
     def __init__(self, default_pid: int = 0):
         self.default_pid = default_pid # Default set for single process traces
 
-    def parse_outer_syscall(self, line: str) -> tuple[str, str, int]:
-        """
-        Parses the outer structure of a system call: name(args) = ret_val
-        """
-        match = re.match(r'^([a-z0-9_]+)\((.*)\)\s*=\s*(-?\d+|0x[0-9a-fA-F]+)(?: .*)?$', line, flags=re.DOTALL)
-        if not match:
-            raise ParserError("parser", f"Failed to parse outer syscall structure: {line}")
-            
-        syscall_name = match.group(1)
-        raw_args = match.group(2)
-        ret_val_str = match.group(3)
-        
-        if ret_val_str.startswith("0x"):
-            ret_val = int(ret_val_str, 16)
-        else:
-            ret_val = int(ret_val_str)
-            
-        return syscall_name, raw_args, ret_val
-
-    def parse_arguments(self, tokens: list[Token]) -> list[Any]:
-        """Parses a complete list of comma-separated tokens."""
-        it = Peekable(tokens)
-        args = []
-        while it:
-            val = self.parse_value(it)
-            args.append(val)
-            
-            comma_tok = it.peek()
-            if comma_tok and comma_tok.type == "COMMA":
-                next(it)
-        return args
-
     def parse_line(self, line: str) -> ParserEvent:
         """
         Extract the system call name and route it to the appropriate parser
@@ -320,13 +288,13 @@ class SyscallParser(BaseParser):
         Helper method to route line to proper parser
         """
         try:
-            syscall_name, raw_args, ret_val = self.parse_outer_syscall(line)
+            syscall_name, raw_args, ret_val = self._parse_outer_syscall(line)
         except ParserError:
             raise ParserError("parser", f"Failed to identify system call prefix: {line}")
 
         try:
             tokens = self.tokenize(raw_args)
-            args = self.parse_arguments(tokens)
+            args = self._parse_arguments(tokens)
         except LexerError as e:
             raise ParserError("parser", f"Lexer error: {e}")
         except ParserError as e:
@@ -334,45 +302,75 @@ class SyscallParser(BaseParser):
 
         match syscall_name:
             case "socket":
-                return self.parse_socket(args, ret_val, pid)
+                return self._parse_socket(args, ret_val, pid)
             
             case "connect" | "bind" | "listen" | "accept" | "accept4":
-                return self.parse_connection(syscall_name, args, ret_val, pid)
+                return self._parse_connection(syscall_name, args, ret_val, pid)
                 
             case "read" | "write":
-                return self.parse_data(syscall_name, args, ret_val, pid)
+                return self._parse_data(syscall_name, args, ret_val, pid)
 
             case "execve":
-                return self.parse_procexec(args, ret_val, pid)
+                return self._parse_procexec(args, ret_val, pid)
                 
             case "open" | "openat" | "unlink" | "unlinkat":
-                return self.parse_file_access(syscall_name, args, ret_val, pid)
+                return self._parse_file_access(syscall_name, args, ret_val, pid)
                 
             case "fork" | "clone" | "vfork" | "clone3":
-                return self.parse_fork(syscall_name, args, ret_val, pid)
+                return self._parse_fork(syscall_name, args, ret_val, pid)
                 
             case "chmod" | "fchmod" | "fchmodat":
-                return self.parse_permission(syscall_name, args, ret_val, pid)
+                return self._parse_permission(syscall_name, args, ret_val, pid)
 
             case "dup" | "dup2" | "dup3":
-                return self.parse_fd_dup(syscall_name, args, ret_val, pid)
+                return self._parse_fd_dup(syscall_name, args, ret_val, pid)
 
             case "setuid" | "setgid" | "setreuid" | "setregid":
-                return self.parse_privilege(syscall_name, args, ret_val, pid)
+                return self._parse_privilege(syscall_name, args, ret_val, pid)
             
             case "ptrace":
-                return self.parse_ptrace(args, ret_val, pid)
+                return self._parse_ptrace(args, ret_val, pid)
 
             case "close":
-                return self.parse_close(args, ret_val, pid)
+                return self._parse_close(args, ret_val, pid)
                 
             case _:
                 raise ParserError("parser", f"No parser registered for system call: {syscall_name}")
 
-    def parse_socket(self, args: list[Any], ret_val: int, pid: int) -> SocketInfo:
+    def _parse_outer_syscall(self, line: str) -> tuple[str, str, int]:
         """
-        Parse socket operations
+        Parses the outer structure of a system call: name(args) = ret_val
         """
+        match = re.match(r'^([a-z0-9_]+)\((.*)\)\s*=\s*(-?\d+|0x[0-9a-fA-F]+)(?: .*)?$', line, flags=re.DOTALL)
+        if not match:
+            raise ParserError("parser", f"Failed to parse outer syscall structure: {line}")
+            
+        syscall_name = match.group(1)
+        raw_args = match.group(2)
+        ret_val_str = match.group(3)
+        
+        if ret_val_str.startswith("0x"):
+            ret_val = int(ret_val_str, 16)
+        else:
+            ret_val = int(ret_val_str)
+            
+        return syscall_name, raw_args, ret_val
+
+    def _parse_arguments(self, tokens: list[Token]) -> list[Any]:
+        """Parses a complete list of comma-separated tokens."""
+        it = Peekable(tokens)
+        args = []
+        while it:
+            val = self.parse_value(it)
+            args.append(val)
+            
+            comma_tok = it.peek()
+            if comma_tok and comma_tok.type == "COMMA":
+                next(it)
+        return args
+
+    def _parse_socket(self, args: list[Any], ret_val: int, pid: int) -> SocketInfo:
+        """Parse socket operations"""
         if len(args) < 3:
             raise ParserError("socket", f"Missing arguments: expected 3, got {len(args)}")
         
@@ -385,10 +383,8 @@ class SyscallParser(BaseParser):
             pid=pid
         )
 
-    def parse_connection(self, syscall: str, args: list[Any], ret_val: int, pid: int) -> ConnectionInfo:
-        """
-        Parse connection operations
-        """
+    def _parse_connection(self, syscall: str, args: list[Any], ret_val: int, pid: int) -> ConnectionInfo:
+        """Parse connection operations"""
         if syscall == "listen":
             if len(args) < 2:
                 raise ParserError("connection", f"listen requires 2 arguments, got {len(args)}")
@@ -421,10 +417,8 @@ class SyscallParser(BaseParser):
             pid=pid
         )
 
-    def parse_data(self, syscall: str, args: list[Any], ret_val: int, pid: int) -> DataTransfer:
-        """
-        Parse Data Transfer operations
-        """
+    def _parse_data(self, syscall: str, args: list[Any], ret_val: int, pid: int) -> DataTransfer:
+        """Parse Data Transfer operations"""
         if len(args) < 3:
             raise ParserError("data transfer", f"Missing arguments: expected 3, got {len(args)}")
         return DataTransfer(
@@ -436,10 +430,8 @@ class SyscallParser(BaseParser):
             pid=pid
         )
 
-    def parse_procexec(self, args: list[Any], ret_val: int, pid: int) -> ProcessExec:
-        """
-        Parse Process Exec
-        """
+    def _parse_procexec(self, args: list[Any], ret_val: int, pid: int) -> ProcessExec:
+        """Parse Process Exec"""
         if len(args) < 3:
             raise ParserError("process exec", f"Missing arguments: expected 3, got {len(args)}")
             
@@ -458,10 +450,8 @@ class SyscallParser(BaseParser):
             pid=pid
         )
 
-    def parse_file_access(self, syscall: str, args: list[Any], ret_val: int, pid: int) -> FileAccess:
-        """
-        Parse File Access operations
-        """
+    def _parse_file_access(self, syscall: str, args: list[Any], ret_val: int, pid: int) -> FileAccess:
+        """Parse File Access operations"""
         if syscall == "open":
             if len(args) < 2:
                 raise ParserError("file access", f"open requires at least 2 arguments, got {len(args)}")
@@ -515,10 +505,8 @@ class SyscallParser(BaseParser):
             
         raise ParserError("file access", f"Unknown syscall: {syscall}")
 
-    def parse_fork(self, syscall: str, args: list[Any], ret_val: int, pid: int) -> ProcessFork:
-        """
-        Parse fork/clone system calls
-        """
+    def _parse_fork(self, syscall: str, args: list[Any], ret_val: int, pid: int) -> ProcessFork:
+        """Parse fork/clone system calls"""
         return ProcessFork(
             operation=ForkOperation(syscall),
             parent_pid=pid,
@@ -526,10 +514,8 @@ class SyscallParser(BaseParser):
             pid=pid
         )
 
-    def parse_close(self, args: list[Any], ret_val: int, pid: int) -> SyscallClose:
-        """
-        Parse close operation
-        """
+    def _parse_close(self, args: list[Any], ret_val: int, pid: int) -> SyscallClose:
+        """Parse close operation"""
         if len(args) < 1:
             raise ParserError("close", f"close requires 1 argument, got {len(args)}")
         return SyscallClose(
@@ -539,10 +525,8 @@ class SyscallParser(BaseParser):
             pid=pid
         )
 
-    def parse_permission(self, syscall: str, args: list[Any], ret_val: int, pid: int) -> PermissionInfo:
-        """
-        Parse permission operations
-        """
+    def _parse_permission(self, syscall: str, args: list[Any], ret_val: int, pid: int) -> PermissionInfo:
+        """Parse permission operations"""
         if syscall == "chmod":
             if len(args) < 2:
                 raise ParserError("permission", f"chmod requires 2 arguments, got {len(args)}")
@@ -582,10 +566,8 @@ class SyscallParser(BaseParser):
             
         raise ParserError("permission", f"Unknown syscall: {syscall}")
 
-    def parse_fd_dup(self, syscall: str, args: list[Any], ret_val: int, pid: int) -> FDDuplication:
-        """
-        Parse fd duplication operations
-        """
+    def _parse_fd_dup(self, syscall: str, args: list[Any], ret_val: int, pid: int) -> FDDuplication:
+        """Parse fd duplication operations"""
         if syscall == "dup":
             if len(args) < 1:
                 raise ParserError("fd duplication", f"dup requires 1 argument, got {len(args)}")
@@ -623,10 +605,8 @@ class SyscallParser(BaseParser):
             
         raise ParserError("fd duplication", f"Unknown syscall: {syscall}")
 
-    def parse_privilege(self, syscall: str, args: list[Any], ret_val: int, pid: int) -> PrivilegeInfo:
-        """
-        Parse privilege operations
-        """
+    def _parse_privilege(self, syscall: str, args: list[Any], ret_val: int, pid: int) -> PrivilegeInfo:
+        """Parse privilege operations"""
         if syscall == "setuid":
             if len(args) < 1:
                 raise ParserError("privilege", f"setuid requires 1 argument, got {len(args)}")
@@ -671,10 +651,8 @@ class SyscallParser(BaseParser):
             
         raise ParserError("privilege", f"Unknown syscall: {syscall}")
 
-    def parse_ptrace(self, args: list[Any], ret_val: int, pid: int) -> PTraceInfo:
-        """
-        Parse ptrace operations
-        """
+    def _parse_ptrace(self, args: list[Any], ret_val: int, pid: int) -> PTraceInfo:
+        """Parse ptrace operations"""
         if len(args) < 4:
             raise ParserError("ptrace", f"ptrace requires 4 arguments, got {len(args)}")
         return PTraceInfo(

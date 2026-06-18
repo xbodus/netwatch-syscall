@@ -237,7 +237,7 @@ class FileAccess:
 
     @property
     def fd(self) -> int:
-        return self.sockfd
+        return self.ret_val
     
 
 
@@ -447,8 +447,70 @@ class ProcessDetails:
     binary_path: str | None = None
     parent_pid: int | None = None
     child_pids: list[int] = field(default_factory=list)
+    uid: int | None = None
+    gid: int | None = None
+    ruid: int | None = None
+    euid: int | None = None
+    rgid: int | None = None
+    egid: int | None = None
 
 
 class Token(NamedTuple):
     type: str
     value: str
+
+
+class State(Enum):
+    INIT = "init"
+    SOCKET_CREATED = "socket created"
+    PORT_BOUND = "port bound"
+    LISTENING = "listening"
+    CONNECTION_ACCEPTED = "connection accepted"
+    STREAMS_REDIRECTED = "streams redirected"
+    FILE_CREATED = "file created"
+    FILE_WRITTEN = "file written"
+    MODE_ESCALATED = "mode escalated"
+    ALERT_TRIGGERED = "alert triggered"
+
+class Severity(Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+@dataclass
+class ThreatAlert:
+    rule_name: str
+    severity: Severity
+    message: str
+    pid: int
+    context: dict[str, Any]
+
+@dataclass
+class TraceEvent:
+    op: str
+    tracee: int
+    tracer: int
+
+@dataclass
+class IOHistory:
+    paths_accessed: set[str] = field(default_factory=set)
+    paths_executed: set[str] = field(default_factory=set)
+    active_sockfds: set[int] = field(default_factory=set)
+    active_fds: set[int] = field(default_factory=set)
+    trace_executed: set[str] = field(default_factory=set)
+
+@dataclass
+class IOVolume:
+    bytes_read: int = field(default=0)
+    bytes_written: int = field(default=0)
+
+@dataclass
+class ConnectionVolume:
+    bytes_sent: int = field(default=0)
+    bytes_received: int = field(default=0)
+
+@dataclass
+class TraceMap:
+    tracee: int | None = None
+    tracer: int | None = None
