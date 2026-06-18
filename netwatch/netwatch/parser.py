@@ -71,7 +71,7 @@ class Peekable:
         return self.peek() is not None
 
 
-class SyscallParser:
+class BaseParser:
     TOKEN_SPECIFICATIONS: list[tuple[str, str]] = [
         ("HEX", r'0x[0-9a-fA-F]+'),
         ("NUMBER", r'-?\d+'),
@@ -89,10 +89,7 @@ class SyscallParser:
         ("SKIP", r'[ \t\n]+'),                 # Ignore spaces and tabs
         ("ELLIPSIS", r'\.\.\.'),               # Truncation ellipsis
         ("MISMATCH", r'.')                     # Catch everything else
-    ]              
-
-    def __init__(self, default_pid: int = 0):
-        self.default_pid = default_pid # Default set for single process traces
+    ] 
 
     def tokenize(self, line: str) -> list[Token]:
         """
@@ -100,9 +97,9 @@ class SyscallParser:
         """
         tok_regex = "|".join(f"(?P<{name}>{pattern})" for name, pattern in self.TOKEN_SPECIFICATIONS)
         tokens = []
-        for tok in re.finditer(tok_regex, line):
-            kind = tok.lastgroup
-            value = tok.group()
+        for token in re.finditer(tok_regex, line):
+            kind = token.lastgroup
+            value = token.group()
             if kind == "SKIP":
                 continue
             elif kind == "MISMATCH":
@@ -111,6 +108,164 @@ class SyscallParser:
             tokens.append(Token(kind, value))
         
         return tokens
+
+    def parse_value(self, it: Peekable) -> Any:
+        """Recursively parses a token stream into native Python structures."""
+        token = next(it, None)
+
+        if not token:
+            raise ParserError("parser", "Unexpected end of input")
+        
+        match token.type:
+            case "LBRACE":
+                d = self._handle_lbrace(it)
+                return d
+
+            case "LBRACKET":
+                lst = self._handle_lbracket(it)
+                return lst
+            
+            case "ID":
+                val = self._handle_id(token, it)
+                return val
+
+            case "NUMBER":
+                num = self._handle_number(token)
+                return num
+            
+            case "HEX":
+                return int(token.value, 16)
+            
+            case "STRING":
+                return token.value[1:-1] # strip double quotes
+            
+            case "COMMENT":
+                return token.value
+                
+            case "ELLIPSIS":
+                return "..."
+                
+            case _:
+                raise ParserError("parser", f"Unexpected token type '{token.type}' with value: {token.value}")
+
+    def _handle_lbrace(self, it: Peekable) -> dict:
+        """Parse struct: {key=value, key2=value2, ...}"""
+        d = {}
+        while True:
+            peek_tok = it.peek()
+            if not peek_tok or peek_tok.type == "RBRACE":
+                break
+
+            if peek_tok.type == "ELLIPSIS":
+                next(it)
+                d["..."] = "..."
+                comma_tok = it.peek()
+                if comma_tok and comma_tok.type == "COMMA":
+                    next(it)
+                continue
+
+            key_tok = next(it)
+            if key_tok.type != "ID":
+                raise ParserError("parser", f"Expected key identifier in struct, got {key_tok.value}")
+            key = key_tok.value
+            
+            eq_tok = next(it, None)
+            if not eq_tok or eq_tok.type != "EQUALS":
+                raise ParserError("parser", f"Expected '=' after key '{key}'")
+                
+            val = self.parse_value(it)
+            d[key] = val
+            
+            comma_tok = it.peek()
+            if comma_tok and comma_tok.type == "COMMA":
+                next(it)
+        
+        rbrace = next(it, None)
+        if not rbrace or rbrace.type != "RBRACE":
+            raise ParserError("parser", "Expected '}' at end of struct")
+
+        return d
+            
+    def _handle_lbracket(self, it: Peekable) -> list:
+        """Parse list: [value, value2, ...]"""
+        lst = []
+        while True:
+            peek_tok = it.peek()
+            if not peek_tok or peek_tok.type == "RBRACKET":
+                break
+            
+            if peek_tok.type == "COMMENT":
+                comment_tok = next(it)
+                lst.append(comment_tok.value)
+            elif peek_tok.type == "ELLIPSIS":
+                next(it)
+                lst.append("...")
+            else:
+                val = self.parse_value(it)
+                lst.append(val)
+            
+            comma_tok = it.peek()
+            if comma_tok and comma_tok.type == "COMMA":
+                next(it)
+        
+        rbracket = next(it, None)
+        if not rbracket or rbracket.type != "RBRACKET":
+            raise ParserError("parser", "Expected ']' at end of list")
+        return lst
+
+    def _handle_id(self, token: Token, it: Peekable) -> str:
+        """Check if this is a function call wrapper (e.g. htons(5555))"""
+        peek_token = it.peek()
+        if peek_token and peek_token.type == "LPAREN":
+            func_name = token.value
+            next(it) # consume LPAREN
+            
+            func_args = []
+            while True:
+                p_tok = it.peek()
+                if not p_tok or p_tok.type == "RPAREN":
+                    break
+
+                val = self.parse_value(it)
+                func_args.append(val)
+                
+                comma_tok = it.peek()
+                if comma_tok and comma_tok.type == "COMMA":
+                    next(it)
+            
+            rparen = next(it, None)
+            if not rparen or rparen.type != "RPAREN":
+                raise ParserError("parser", f"Expected ')' at end of function '{func_name}'")
+            
+            # Semantic unwrapping of standard wrapper functions
+            if func_name == "htons" and func_args:
+                return func_args[0]
+            elif func_name in ("inet_addr", "inet_pton") and func_args:
+                return func_args[-1]  # IP string
+            else:
+                args_str = ", ".join(repr(a) for a in func_args)
+                return f"{func_name}({args_str})"
+        elif peek_token and peek_token.type == "EQUALS":
+            key = token.value
+            next(it) # consume EQUALS
+            val = self.parse_value(it)
+            return f"{key}={val}"
+        else:
+            return token.value
+
+    def _handle_number(self, token: Token) -> int:
+        """Handle octal literals (permission modes like 0644)"""
+        if token.value.startswith("0") and len(token.value) > 1:
+            try:
+                return int(token.value, 8)
+            except ValueError:
+                pass
+        return int(token.value)
+
+
+class SyscallParser(BaseParser):
+    def __init__(self, default_pid: int = 0):
+        self.default_pid = default_pid # Default set for single process traces
 
     def parse_outer_syscall(self, line: str) -> tuple[str, str, int]:
         """
@@ -131,148 +286,12 @@ class SyscallParser:
             
         return syscall_name, raw_args, ret_val
 
-    def _parse_value(self, it: Peekable) -> Any:
-        """Recursively parses a token stream into native Python structures."""
-
-        token = next(it, None)
-
-        if not token:
-            raise ParserError("parser", "Unexpected end of input")
-            
-        if token.type == "LBRACE":
-            # Parse struct: {key=value, key2=value2, ...}
-            d = {}
-            while True:
-                peek_tok = it.peek()
-                if not peek_tok or peek_tok.type == "RBRACE":
-                    break
-
-                if peek_tok.type == "ELLIPSIS":
-                    next(it)
-                    d["..."] = "..."
-                    comma_tok = it.peek()
-                    if comma_tok and comma_tok.type == "COMMA":
-                        next(it)
-                    continue
-
-                key_tok = next(it)
-                if key_tok.type != "ID":
-                    raise ParserError("parser", f"Expected key identifier in struct, got {key_tok.value}")
-                key = key_tok.value
-                
-                eq_tok = next(it, None)
-                if not eq_tok or eq_tok.type != "EQUALS":
-                    raise ParserError("parser", f"Expected '=' after key '{key}'")
-                    
-                val = self._parse_value(it)
-                d[key] = val
-                
-                comma_tok = it.peek()
-                if comma_tok and comma_tok.type == "COMMA":
-                    next(it)
-            
-            rbrace = next(it, None)
-            if not rbrace or rbrace.type != "RBRACE":
-                raise ParserError("parser", "Expected '}' at end of struct")
-            return d
-            
-        elif token.type == "LBRACKET":
-            # Parse list: [value, value2, ...]
-            lst = []
-            while True:
-                peek_tok = it.peek()
-                if not peek_tok or peek_tok.type == "RBRACKET":
-                    break
-                
-                if peek_tok.type == "COMMENT":
-                    comment_tok = next(it)
-                    lst.append(comment_tok.value)
-                elif peek_tok.type == "ELLIPSIS":
-                    next(it)
-                    lst.append("...")
-                else:
-                    val = self._parse_value(it)
-                    lst.append(val)
-                
-                comma_tok = it.peek()
-                if comma_tok and comma_tok.type == "COMMA":
-                    next(it)
-            
-            rbracket = next(it, None)
-            if not rbracket or rbracket.type != "RBRACKET":
-                raise ParserError("parser", "Expected ']' at end of list")
-            return lst
-            
-        elif token.type == "ID":
-            # Check if this is a function call wrapper (e.g. htons(5555))
-            peek_token = it.peek()
-            if peek_token and peek_token.type == "LPAREN":
-                func_name = token.value
-                next(it) # consume LPAREN
-                
-                func_args = []
-                while True:
-                    p_tok = it.peek()
-                    if not p_tok or p_tok.type == "RPAREN":
-                        break
-
-                    val = self._parse_value(it)
-                    func_args.append(val)
-                    
-                    comma_tok = it.peek()
-                    if comma_tok and comma_tok.type == "COMMA":
-                        next(it)
-                
-                rparen = next(it, None)
-                if not rparen or rparen.type != "RPAREN":
-                    raise ParserError("parser", f"Expected ')' at end of function '{func_name}'")
-                
-                # Semantic unwrapping of standard wrapper functions
-                if func_name == "htons" and func_args:
-                    return func_args[0]
-                elif func_name in ("inet_addr", "inet_pton") and func_args:
-                    return func_args[-1]  # IP string
-                else:
-                    args_str = ", ".join(repr(a) for a in func_args)
-                    return f"{func_name}({args_str})"
-            elif peek_token and peek_token.type == "EQUALS":
-                key = token.value
-                next(it) # consume EQUALS
-                val = self._parse_value(it)
-                return f"{key}={val}"
-            else:
-                return token.value
-                
-        elif token.type == "NUMBER":
-            # Handle octal literals (permission modes like 0644)
-            if token.value.startswith("0") and len(token.value) > 1:
-                try:
-                    return int(token.value, 8)
-                except ValueError:
-                    pass
-            return int(token.value)
-            
-        elif token.type == "HEX":
-            return int(token.value, 16)
-            
-        elif token.type == "STRING":
-            return token.value[1:-1] # strip double quotes
-            
-        elif token.type == "COMMENT":
-            return token.value
-            
-        elif token.type == "ELLIPSIS":
-            return "..."
-            
-        else:
-            raise ParserError("parser", f"Unexpected token type '{token.type}' with value: {token.value}")
-
     def parse_arguments(self, tokens: list[Token]) -> list[Any]:
         """Parses a complete list of comma-separated tokens."""
         it = Peekable(tokens)
         args = []
         while it:
-            val = self._parse_value(it)
+            val = self.parse_value(it)
             args.append(val)
             
             comma_tok = it.peek()
