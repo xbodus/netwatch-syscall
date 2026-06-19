@@ -379,14 +379,14 @@ def test_parse_fd_dup():
     # dup test
     assert dup_res.operation == FDDuplicationOperation.DUP
     assert dup_res.oldfd == 3
-    assert dup_res.ret_value == 4
+    assert dup_res.ret_val == 4
     assert dup_res.pid == 0
 
     # dup2 test
     assert dup2_res.operation == FDDuplicationOperation.DUP2
     assert dup2_res.oldfd == 3
     assert dup2_res.newfd == 5
-    assert dup2_res.ret_value == 5
+    assert dup2_res.ret_val == 5
     assert dup2_res.pid == 1000
 
     # dup3 test
@@ -394,7 +394,7 @@ def test_parse_fd_dup():
     assert dup3_res.oldfd == 3
     assert dup3_res.newfd == 5
     assert dup3_res.flags == ["O_CLOEXEC"]
-    assert dup3_res.ret_value == 5
+    assert dup3_res.ret_val == 5
     assert dup3_res.pid == 0
 
 

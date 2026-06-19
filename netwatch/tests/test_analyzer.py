@@ -235,3 +235,104 @@ def test_valid_fork():
     assert entries.binary_path == "Unknown"
     assert entries.parent_pid == None
     assert entries.child_pids == [1001, 1001]
+
+
+def test_metrics_accumulation():
+    state = SyscallState()
+    syscall_queue = Queue()
+
+    # 1. Process Exec
+    syscall_queue.put('[pid 1000] execve("/usr/bin/python3", ["python3"], 0x7fffc2c935f0) = 0')
+    
+    # 2. Socket creation and connection
+    syscall_queue.put('[pid 1000] socket(PF_INET, SOCK_STREAM, IPPROTO_TCP) = 3')
+    syscall_queue.put('[pid 1000] connect(3, {sa_family=AF_INET, sin_port=htons(8080), sin_addr=inet_addr("1.2.3.4")}, 16) = 0')
+    
+    # 3. Socket I/O
+    syscall_queue.put('[pid 1000] write(3, "request_payload", 15) = 15')
+    syscall_queue.put('[pid 1000] read(3, "response_payload_20", 20) = 20')
+    
+    # 4. Normal File I/O (fd 4)
+    syscall_queue.put('[pid 1000] openat(AT_FDCWD, "/tmp/test.txt", O_WRONLY|O_CREAT) = 4')
+    syscall_queue.put('[pid 1000] write(4, "hello_world_file", 16) = 16')
+    
+    consumer_stop_event = threading.Event()
+    consumer_thread = threading.Thread(target=consumer, args=(syscall_queue, consumer_stop_event, state), daemon=True)
+    consumer_thread.start()
+    time.sleep(0.1)
+    consumer_stop_event.set()
+
+    # Assert execution counts
+    assert state.process_execution_counts.get("/usr/bin/python3") == 1
+
+    # Assert connection volumes
+    net_key = ("1.2.3.4", 8080)
+    assert net_key in state.network_destination
+    assert state.network_destination[net_key].bytes_sent == 15
+    assert state.network_destination[net_key].bytes_received == 20
+
+    # Assert file I/O volumes
+    assert state.io_volume[1000].bytes_written == 16
+    assert state.io_volume[1000].bytes_read == 0
+
+
+def test_fsm_backdoor_detection(caplog):
+    import logging
+    state = SyscallState()
+    syscall_queue = Queue()
+
+    # Backdoor sequence
+    lines = [
+        '[pid 1000] socket(PF_INET, SOCK_STREAM, IPPROTO_TCP) = 3',
+        '[pid 1000] bind(3, {sa_family=AF_INET, sin_port=htons(4444), sin_addr=inet_addr("0.0.0.0")}, 16) = 0',
+        '[pid 1000] listen(3, 128) = 0',
+        '[pid 1000] accept(3, {sa_family=AF_INET, sin_port=htons(55555), sin_addr=inet_addr("192.168.1.100")}, 16) = 4',
+        '[pid 1000] dup2(4, 0) = 0',
+        '[pid 1000] dup2(4, 1) = 1',
+        '[pid 1000] dup2(4, 2) = 2',
+        '[pid 1000] execve("/bin/sh", ["sh"], 0x7fffc2c935f0) = 0'
+    ]
+
+    for line in lines:
+        syscall_queue.put(line)
+
+    consumer_stop_event = threading.Event()
+    consumer_thread = threading.Thread(target=consumer, args=(syscall_queue, consumer_stop_event, state), daemon=True)
+    
+    with caplog.at_level(logging.WARNING):
+        consumer_thread.start()
+        time.sleep(0.1)
+        consumer_stop_event.set()
+
+    # Check alert was triggered and logged
+    assert any("Inbound Backdoor Listener" in record.message for record in caplog.records)
+    assert any("CRITICAL" in record.message for record in caplog.records)
+
+
+def test_fsm_dropper_detection(caplog):
+    import logging
+    state = SyscallState()
+    syscall_queue = Queue()
+
+    # Dropper sequence
+    lines = [
+        '[pid 2000] openat(AT_FDCWD, "/tmp/payload", O_WRONLY|O_CREAT) = 3',
+        '[pid 2000] write(3, "malicious_bytes", 15) = 15',
+        '[pid 2000] fchmod(3, 0755) = 0',
+        '[pid 2000] execve("/tmp/payload", ["payload"], 0x7fffc2c935f0) = 0'
+    ]
+
+    for line in lines:
+        syscall_queue.put(line)
+
+    consumer_stop_event = threading.Event()
+    consumer_thread = threading.Thread(target=consumer, args=(syscall_queue, consumer_stop_event, state), daemon=True)
+
+    with caplog.at_level(logging.WARNING):
+        consumer_thread.start()
+        time.sleep(0.1)
+        consumer_stop_event.set()
+
+    # Check alert was triggered and logged
+    assert any("Payload Dropper" in record.message for record in caplog.records)
+    assert any("HIGH" in record.message for record in caplog.records)

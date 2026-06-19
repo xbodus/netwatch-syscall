@@ -367,7 +367,7 @@ class FDDuplication:
     """
     operation: FDDuplicationOperation
     oldfd: int
-    ret_value: int
+    ret_val: int
     pid: int | None = None
     newfd: int | None = None
     flags: list[str] | None = None

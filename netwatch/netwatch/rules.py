@@ -30,7 +30,7 @@ def backdoor_fsm() -> FSM:
     )
 
     # Event 1: Socket created
-    creation_condition: Callable[[SocketInfo, "SyscallState"], bool] = lambda event, state_store: event.domain in [SocketDomain.AF_INET, SocketDomain.AF_INET6] and event.type == SocketType.SOCK_STREAM
+    creation_condition: Callable[[SocketInfo, "SyscallState"], bool] = lambda event, state_store: event.domain in [SocketDomain.AF_INET, SocketDomain.AF_INET6, SocketDomain.PF_INET, SocketDomain.PF_INET6] and event.type == SocketType.SOCK_STREAM
     fsm.add_transition(State.INIT, "socket", State.SOCKET_CREATED, creation_condition)
     
     # Event 2: Process binds to socket
@@ -40,8 +40,10 @@ def backdoor_fsm() -> FSM:
     fsm.add_transition(State.PORT_BOUND, "listen", State.LISTENING)
 
     # Event 4: Outside connection established
-    connect_condition: Callable[[ConnectionInfo, "SyscallState"], bool] = lambda event, state_store: event.operation == ConnectionOperation.CONNECT and event.ret_val != -1
+    connect_condition: Callable[[ConnectionInfo, "SyscallState"], bool] = lambda event, state_store: event.operation in [ConnectionOperation.CONNECT, ConnectionOperation.ACCEPT, ConnectionOperation.ACCEPT4] and event.ret_val != -1
     fsm.add_transition(State.LISTENING, "connect", State.CONNECTION_ACCEPTED, connect_condition)
+    fsm.add_transition(State.LISTENING, "accept", State.CONNECTION_ACCEPTED, connect_condition)
+    fsm.add_transition(State.LISTENING, "accept4", State.CONNECTION_ACCEPTED, connect_condition)
 
     # Event 5: Socket obsfucated from normal fd
     redirect_condition: Callable[[FDDuplication, "SyscallState"], bool] = lambda event, state_store: event.oldfd != event.newfd
@@ -64,14 +66,24 @@ def dropper_fsm() -> FSM:
     # Event 1: Check files opened in suspicious locations
     open_condition: Callable[[FileAccess, "SyscallState"], bool] = lambda event, state_store: event.path.startswith(("/tmp/", "/var/tmp/", "/dev/shm/"))
     fsm.add_transition(State.INIT, "open", State.FILE_CREATED, open_condition)
+    fsm.add_transition(State.INIT, "openat", State.FILE_CREATED, open_condition)
 
     # Event 2: Checks for bytes written to path
     fsm.add_transition(State.FILE_CREATED, "write", State.FILE_WRITTEN)
 
     # Event 3: Check for permission changes
-    permission_condition: Callable[[PermissionInfo, "SyscallState"], bool] = lambda event, state_store: event.mode & 73 and event.path in state_store.history[event.pid].paths_accessed
+    permission_condition: Callable[[PermissionInfo, "SyscallState"], bool] = lambda event, state_store: (
+        bool(event.mode & 73) and (
+            (event.path in state_store.history[event.pid].paths_accessed) if event.path
+            else (
+                state_store.fd_paths[event.pid].get(event.fd) in state_store.history[event.pid].paths_accessed
+            )
+        )
+    )
     fsm.add_transition(State.FILE_WRITTEN, "permission", State.MODE_ESCALATED, permission_condition)
 
     # Event 4: Trigger alert if suspicious file has been executed
     alert_condition: Callable[[ProcessExec, "SyscallState"], bool] = lambda event, state_store: event.pathname in state_store.history[event.pid].paths_accessed
     fsm.add_transition(State.MODE_ESCALATED, "execve", State.ALERT_TRIGGERED, alert_condition)
+
+    return fsm

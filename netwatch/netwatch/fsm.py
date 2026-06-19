@@ -7,7 +7,6 @@ from .models import (
     ParserEvent,
     State,
     Severity,
-    ThreatAlert
 )
 
 if TYPE_CHECKING:

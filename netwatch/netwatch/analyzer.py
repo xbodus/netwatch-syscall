@@ -9,7 +9,7 @@ from queue import Queue, Empty
 from threading import Event
 import logging
 from .parser import SyscallParser
-from .models import ParserEvent
+from .models import ParserEvent, ThreatAlert
 from .state import SyscallState
 from .exceptions import ParserError, LexerError, StateError
 
@@ -24,13 +24,17 @@ def analyze_syscall_stream(q: Queue, event: Event, state: SyscallState = None) -
     Tails logs stored in queue from live strace feed and flags potential malicious patterns
     """
     parser = SyscallParser()
+
     if not state:
         state = SyscallState()
 
     while not event.is_set():
         try:
             parsed_data: ParserEvent = parser.parse_line(q.get(timeout=0.1))
-            state.update(parsed_data)
+            alerts: list[ThreatAlert] = state.update(parsed_data)
+            if len(alerts) > 0:
+                for alert in alerts:
+                    logger.warning(f"[{alert.severity}] {alert.message}")
         except (Empty, ParserError, LexerError, StateError) as e:
             if not isinstance(e, Empty):
                 logger.warning(f"[ERROR] Analyzer Error: {e}")

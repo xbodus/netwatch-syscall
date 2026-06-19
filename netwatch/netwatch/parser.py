@@ -574,7 +574,7 @@ class SyscallParser(BaseParser):
             return FDDuplication(
                 operation=FDDuplicationOperation.DUP,
                 oldfd=args[0],
-                ret_value=ret_val,
+                ret_val=ret_val,
                 pid=pid
             )
             
@@ -585,7 +585,7 @@ class SyscallParser(BaseParser):
                 operation=FDDuplicationOperation.DUP2,
                 oldfd=args[0],
                 newfd=args[1],
-                ret_value=ret_val,
+                ret_val=ret_val,
                 pid=pid
             )
             
@@ -599,7 +599,7 @@ class SyscallParser(BaseParser):
                 oldfd=args[0],
                 newfd=args[1],
                 flags=flags,
-                ret_value=ret_val,
+                ret_val=ret_val,
                 pid=pid
             )
             
