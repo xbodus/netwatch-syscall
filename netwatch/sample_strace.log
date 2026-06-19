@@ -1,0 +1,17 @@
+[pid 1000] execve("/usr/bin/python3", ["python3"], 0x7fffc2c935f0) = 0
+[pid 1000] openat(AT_FDCWD, "/usr/lib/libc.so", O_RDONLY) = 3
+[pid 1000] read(3, "ELF\\1\\1\\1\\0\\0\\0\\0\\0\\0\\0\\0\\0", 1024) = 1024
+[pid 1000] close(3) = 0
+[pid 2000] openat(AT_FDCWD, "/tmp/evil_payload", O_WRONLY|O_CREAT) = 3
+[pid 2000] write(3, "ELF\\1\\1\\1\\0\\0\\0\\0\\0\\0\\0\\0\\0", 100) = 100
+[pid 2000] fchmod(3, 0755) = 0
+[pid 2000] close(3) = 0
+[pid 2000] execve("/tmp/evil_payload", ["evil_payload"], 0x7fffc2c935f0) = 0
+[pid 3000] socket(PF_INET, SOCK_STREAM, IPPROTO_TCP) = 3
+[pid 3000] bind(3, {sa_family=AF_INET, sin_port=htons(4444), sin_addr=inet_addr("0.0.0.0")}, 16) = 0
+[pid 3000] listen(3, 128) = 0
+[pid 3000] accept(3, {sa_family=AF_INET, sin_port=htons(55123), sin_addr=inet_addr("192.168.1.50")}, 16) = 4
+[pid 3000] dup2(4, 0) = 0
+[pid 3000] dup2(4, 1) = 1
+[pid 3000] dup2(4, 2) = 2
+[pid 3000] execve("/bin/bash", ["bash", "-i"], 0x7fffc2c935f0) = 0
