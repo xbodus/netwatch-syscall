@@ -30,8 +30,9 @@ def analyze_syscall_stream(q: Queue, event: Event, state: SyscallState = None) -
 
     while not event.is_set():
         try:
-            parsed_data: ParserEvent = parser.parse_line(q.get(timeout=0.1))
-            alerts: list[ThreatAlert] = state.update(parsed_data)
+            line = q.get(timeout=0.1)
+            parsed_data: ParserEvent = parser.parse_line(line)
+            alerts: list[ThreatAlert] = state.update(parsed_data, line)
             if len(alerts) > 0:
                 for alert in alerts:
                     logger.warning(f"[{alert.severity}] {alert.message}")

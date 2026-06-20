@@ -1,0 +1,115 @@
+Sidebar {
+    background: $boost;
+    border: solid #84d3e9ff;
+}
+
+#metrics-grid {
+    layout: grid;
+    grid-size: 4;
+    grid-columns: 1fr 1fr 1fr 1fr;
+    height: 10;
+    margin: 1 0;
+}
+
+MetricWidget {
+    background: $panel;
+    border: solid #84d3e9ff;
+    padding: 1 2;
+    align: center middle;
+    height: 100%;
+}
+
+.metric-title {
+    color: #84d3e9ff;
+    text-align: center;
+    text-style: bold;
+    height: 1;
+}
+
+#metric-digits {
+    text-align: center;
+    color: $text;
+}
+
+.bold-text {
+    text-style: bold;
+}
+
+#log-display-section {
+    height: 15;
+    border: solid #84d3e9ff;
+}
+
+#log-feed-box {
+    height: 1fr;
+    width: 100%;
+    overflow-x: hidden;
+    overflow-y: scroll;
+}
+
+.section-header {
+    background: #84d3e9ff;
+    color: black;
+    text-style: bold;
+    width: 100%;
+    padding: 0 1;
+}
+
+#details-container {
+    height: 60%;
+}
+
+#table-section {
+    width: 60%;
+    border: solid #84d3e9ff;
+}
+
+#tree-section {
+    width: 40%;
+    border: solid #84d3e9ff;
+}
+
+#io-section {
+    height: 15;
+    border: solid #84d3e9ff;
+    padding: 0;
+}
+
+.io-scroll {
+    padding: 1 2;
+}
+
+#mitre-section {
+    height: 1fr;
+    border: solid #84d3e9ff;
+}
+
+AlertModal {
+    align: center middle;
+}
+
+#alert-box {
+    background: #440000;
+    border: double #ff5555;
+    padding: 2 4;
+    width: 80;
+    height: auto;
+    align: center middle;
+    color: white;
+}
+
+#alert-title {
+    text-style: bold;
+    text-align: center;
+    color: #ff5555;
+    margin-bottom: 1;
+}
+
+#alert-field-rule, #alert-field-pid, #alert-field-msg {
+    margin: 0;
+}
+
+#alert-ack-btn {
+    margin-top: 1;
+    align-horizontal: center;
+}

@@ -1,4 +1,5 @@
 from collections import defaultdict
+import threading
 import logging
 from .models import (
     ParserEvent, 
@@ -35,6 +36,8 @@ logger = logging.getLogger(__name__)
 
 class SyscallState:
     def __init__(self):
+        self.lock = threading.Lock()
+        self.raw_logs: list[str] = []
         self.active_fds: dict[int, dict[int, ParserEvent]] = defaultdict(dict) # Tracks open resources (files, sockets, pipes) Ex: {pid:{ fd:{ event details } }}
         self.processes: dict[int, ProcessDetails] = {} # Tracks metadata and lineage (which process spawned which). Ex: { pid: process details }
         self.history: dict[int, IOHistory] = {} # Tracks pid history  Dict ex: {pid: IOHistory(paths_accessed={}, paths_executed={}, active_sockfds={}, active_fds={})}  {} = sets
@@ -45,114 +48,116 @@ class SyscallState:
         self.trace_map: dict[int, TraceMap] = {} # Tracks relationships between tracees and tracers
         self.process_fsms: dict[int, list[FSM]] = {}
         self.fd_paths: dict[int, dict[int, str]] = defaultdict(dict)
+        self.alerts: list[ThreatAlert] = []
 
-    def update(self, event: ParserEvent) -> list[ThreatAlert]:
-        # Skip failed events
-        if hasattr(event, "ret_val"):
-            if getattr(event, "ret_val") < 0:
-                return []
-        elif hasattr(event, "fd"):
-            if getattr(event, "fd") < 0:
-                return []
-        elif hasattr(event, "bytes_transferred"):
-            if getattr(event, "bytes_transferred") < 0:
-                return []
-        elif hasattr(event, "child_pid"):
-            if getattr(event, "child_pid") < 0:
+    def update(self, event: ParserEvent, raw_line: str) -> list[ThreatAlert]:
+        with self.lock:
+            # Skip failed events
+            if (
+                (hasattr(event, "ret_val") and getattr(event, "ret_val") is not None and getattr(event, "ret_val") < 0) or
+                (hasattr(event, "fd") and getattr(event, "fd") is not None and getattr(event, "fd") < 0) or
+                (hasattr(event, "bytes_transferred") and getattr(event, "bytes_transferred") is not None and getattr(event, "bytes_transferred") < 0) or
+                (hasattr(event, "child_pid") and getattr(event, "child_pid") is not None and getattr(event, "child_pid") < 0)
+            ):
                 return []
 
-        if event.pid not in self.process_fsms:
-            # Initialize FSMs for pid
-            bd_fsm = backdoor_fsm()
-            d_fsm = dropper_fsm()
+            self.raw_logs.append(raw_line)
 
-            self.process_fsms[event.pid] = [bd_fsm, d_fsm]
+            if event.pid not in self.process_fsms:
+                # Initialize FSMs for pid
+                bd_fsm = backdoor_fsm()
+                d_fsm = dropper_fsm()
 
-        alerts: list[ThreatAlert] = []
+                self.process_fsms[event.pid] = [bd_fsm, d_fsm]
 
-        alert_type: str | None = None
+            alerts: list[ThreatAlert] = []
 
-        match event:
-            case SocketInfo():
-                self._handle_socket(event)
-                alert_type = "socket"
+            alert_type: str | None = None
 
-            case ConnectionInfo():
-                self._handle_connect(event)
-                connect_types = {
-                    "connect": "connect",
-                    "bind": "bind",
-                    "listen": "listen",
-                    "accept": "accept",
-                    "accept4": "accept4"
-                }
-                alert_type = connect_types[event.operation.value]
+            match event:
+                case SocketInfo():
+                    self._handle_socket(event)
+                    alert_type = "socket"
 
-            case DataTransfer():
-                self._handle_data_transfer(event)
-                data_transfer_types = {
-                    "read": "read",
-                    "write": "write"
-                }
-                alert_type = data_transfer_types[event.operation.value]
+                case ConnectionInfo():
+                    self._handle_connect(event)
+                    connect_types = {
+                        "connect": "connect",
+                        "bind": "bind",
+                        "listen": "listen",
+                        "accept": "accept",
+                        "accept4": "accept4"
+                    }
+                    alert_type = connect_types[event.operation.value]
 
-            case ProcessExec():
-                self._handle_process_exec(event)
-                alert_type = "execve"
+                case DataTransfer():
+                    self._handle_data_transfer(event)
+                    data_transfer_types = {
+                        "read": "read",
+                        "write": "write"
+                    }
+                    alert_type = data_transfer_types[event.operation.value]
 
-            case FileAccess():
-                self._handle_file_access(event)
-                file_access_types = {
-                    "open": "open",
-                    "openat": "openat",
-                    "unlink": "unlink",
-                    "unlinkat": "unlinkat"
-                }
-                alert_type = file_access_types[event.operation.value]
+                case ProcessExec():
+                    self._handle_process_exec(event)
+                    alert_type = "execve"
 
-            case ProcessFork():
-                self._handle_fork(event)
-                alert_type = "fork"
+                case FileAccess():
+                    self._handle_file_access(event)
+                    file_access_types = {
+                        "open": "open",
+                        "openat": "openat",
+                        "unlink": "unlink",
+                        "unlinkat": "unlinkat"
+                    }
+                    alert_type = file_access_types[event.operation.value]
 
-            case FDDuplication():
-                self._handle_fd_dup(event)
-                alert_type = "fd duplication"
+                case ProcessFork():
+                    self._handle_fork(event)
+                    alert_type = "fork"
 
-            case PermissionInfo():
-                self._handle_permission(event)
-                alert_type = "permission"
+                case FDDuplication():
+                    self._handle_fd_dup(event)
+                    alert_type = "fd duplication"
 
-            case PrivilegeInfo():
-                self._handle_privilege(event)
-                alert_type = "privilege"
+                case PermissionInfo():
+                    self._handle_permission(event)
+                    alert_type = "permission"
 
-            case PTraceInfo():
-                self._handle_ptrace(event)
-                alert_type = "ptrace"
+                case PrivilegeInfo():
+                    self._handle_privilege(event)
+                    alert_type = "privilege"
 
-            case SyscallClose():
-                self._handle_close(event)
-                alert_type = "close"
+                case PTraceInfo():
+                    self._handle_ptrace(event)
+                    alert_type = "ptrace"
 
-            case _:
-                logger.warning(f"Unhandled event type: {type(event).__name__}")
-        
-        if alert_type:
-            for fsm in self.process_fsms[event.pid]:
-                fsm_state = fsm.transition(alert_type, event, self)
-                if fsm_state == State.ALERT_TRIGGERED:
-                    alerts.append(
-                        ThreatAlert(
-                            rule_name=fsm.name,
-                            severity=fsm.severity,
-                            message=f"{event.pid} Triggered Alert: {fsm.name}",
-                            pid=event.pid,
-                            context={}
+                case SyscallClose():
+                    self._handle_close(event)
+                    alert_type = "close"
+
+                case _:
+                    logger.warning(f"Unhandled event type: {type(event).__name__}")
+            
+            if alert_type:
+                for fsm in self.process_fsms[event.pid]:
+                    fsm_state = fsm.transition(alert_type, event, self)
+                    if fsm_state == State.ALERT_TRIGGERED:
+                        alerts.append(
+                            ThreatAlert(
+                                rule_name=fsm.name,
+                                severity=fsm.severity,
+                                message=f"{event.pid} Triggered Alert: {fsm.name}",
+                                pid=event.pid,
+                                context={}
+                            )
                         )
-                    )
-                    fsm.reset()
+                        fsm.reset()
+            
+            if alerts:
+                self.alerts.extend(alerts)
 
-        return alerts
+            return alerts
     
 
     def _handle_socket(self, event: SocketInfo) -> None:

@@ -14,6 +14,7 @@ import logging
 import time
 from .analyzer import analyze_syscall_stream
 from .state import SyscallState
+from .tui import NetwatchApp
 
 
 
@@ -26,12 +27,14 @@ def main():
 
     Parses command-line arguments and dispatches to analyzer.
     """
+    state = SyscallState()
     parser = argparse.ArgumentParser()
 
     parser.add_argument("process", nargs="?", help="Specify single process to trace")
     parser.add_argument("-v", "--verbose", help="Displays verbose logging to console", action="store_true")
     parser.add_argument("-p", "--pid", nargs="*", help="Specify process id(s) to trace")
     parser.add_argument("-i", "--input", nargs="?", help="Preform analysis on strace log file based on input file")
+    parser.add_argument("-nd", "--no-dashboard", help="Don't use TUI dashboard for analysis", action="store_true", default=False)
     # Flags: -o (FILE OUTPUT), -c (SUMMARY), -e (FILTERING), -s (OUTPUT SIZE), -v (VERBOSE), -t (ADDS TIME CLOCK), -tt (ADDS MICROSECONDS), -T (SHOW TOTAL DURATION)
     # Sample input: -a "-e trace=network"
     parser.add_argument("-a", "--args", help="Pass specific strace flags to customize output")
@@ -87,19 +90,28 @@ def main():
     if args.input:
         producer_thread = threading.Thread(target=producer, kwargs={"q": syscall_queue, "event": producer_thread_event, "file": args.input}, daemon=True)
 
-    consumer_thread = threading.Thread(target=consumer, args=(syscall_queue, consumer_thread_event), daemon=True)
+    consumer_thread = threading.Thread(target=consumer, args=(syscall_queue, consumer_thread_event, state), daemon=True)
+
+    logger.info("[INFO] Starting Netwatch. Looking for anamolies...")
+
+    producer_thread.start()
+    consumer_thread.start()
 
     try:
-        logger.info("[INFO] Starting Netwatch. Looking for anamolies...")
-        producer_thread.start()
-        consumer_thread.start()
-        producer_thread.join()
-
-        if args.input:
-            while not syscall_queue.empty():
-                time.sleep(0.5)
-
+        if not args.no_dashboard:
+            app = NetwatchApp(state=state)
+            app.run()
+            # Stop background threads when TUI exits
+            producer_thread_event.set()
             consumer_thread_event.set()
+        else:
+            if args.input:
+                producer_thread.join()
+                while not syscall_queue.empty():
+                    time.sleep(0.1)
+                consumer_thread_event.set()
+            else:
+                producer_thread.join()
 
     except KeyboardInterrupt:
         producer_thread_event.set()

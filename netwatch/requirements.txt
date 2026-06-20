@@ -1,0 +1,15 @@
+iniconfig==2.3.0
+linkify-it-py==2.1.0
+markdown-it-py==4.2.0
+mdit-py-plugins==0.6.1
+mdurl==0.1.2
+-e git+https://github.com/xbodus/netwatch-syscall.git@873fac18d0f6d5387192051b01e4c1e562f94366#egg=netwatch&subdirectory=netwatch
+packaging==26.0
+platformdirs==4.10.0
+pluggy==1.6.0
+Pygments==2.19.2
+pytest==9.0.2
+rich==15.0.0
+textual==8.2.7
+typing_extensions==4.15.0
+uc-micro-py==2.0.0
